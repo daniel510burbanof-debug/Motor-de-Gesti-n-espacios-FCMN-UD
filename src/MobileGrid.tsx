@@ -20,7 +20,7 @@ export default function MobileGrid({ reservations, onCellClick }: MobileGridProp
 
   const dayReservations = reservations
     .filter(r => r.day === DAYS_FULL[selectedDay])
-    .sort((a, b) => a.hour.localeCompare(b.hour));
+    .sort((a, b) => (a.hour || "").localeCompare(b.hour || ""));
 
   // Agrupar por hora para detectar paralelos
   const byHour: Record<string, any[]> = {};
@@ -53,7 +53,7 @@ export default function MobileGrid({ reservations, onCellClick }: MobileGridProp
               boxShadow: active ? `0 4px 12px ${T.udAccent}50` : "none",
               transition: "all 0.15s",
             }}>
-              <span style={{ fontSize: 15, fontWeight: 700 }}>{d}</span>
+              <span style={{ fontSize: 15, fontWeight: 700 }} translate="no">{d}</span>
               {count > 0 && (
                 <span style={{
                   fontSize: 9, background: active ? "rgba(255,255,255,0.3)" : T.udAccent,
