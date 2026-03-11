@@ -112,8 +112,8 @@ function hourRangeLabel(h: string): string {
 
 function getHoursBetween(start:string,end:string):string[]{
   const si=HOURS.indexOf(start),ei=HOURS.indexOf(end);
-  if(si===-1||ei===-1||ei<si)return[start];
-  return HOURS.slice(si,ei+1);
+  if(si===-1||ei===-1||ei<=si)return[start];
+  return HOURS.slice(si,ei); // ← solo los bloques reales: 06:00 y 07:00
 }
 function getEndHourOptions(h:string):string[]{
   const i=HOURS.indexOf(h); return i===-1?[]:HOURS.slice(i);
@@ -1203,11 +1203,11 @@ export default function App(){
                     <span style={{color:T.muted}}>Bloques: </span>
                     <span style={{color:"#60a5fa",fontWeight:600}}>
                       {/* ← CAMBIO: mostrar bloques como rangos */}
-                      {getHoursBetween(form.hour,form.hour_end).slice(0,-1).map((h,i,arr)=>(
+                      {getHoursBetween(form.hour,form.hour_end).map((h,i)=>(
                         `${h} a ${HOURS[HOURS.indexOf(h)+1]}`
                       )).join(" · ")}
                     </span>
-                    <span style={{color:T.muted,marginLeft:8}}>({getHoursBetween(form.hour,form.hour_end).length-1}h)</span>
+                    <span style={{color:T.muted,marginLeft:8}}>({getHoursBetween(form.hour,form.hour_end).length}h)</span>
                   </div>
                 )}
                 <div>
