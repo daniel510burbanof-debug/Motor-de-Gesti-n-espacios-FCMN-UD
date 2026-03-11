@@ -103,6 +103,13 @@ const T_STATIC = {
   mutedLight:"#94a3b8",
 };
 
+// ← CAMBIO: helper para formato de rango
+function hourRangeLabel(h: string): string {
+  const i = HOURS.indexOf(h);
+  if (i === -1 || i >= HOURS.length - 1) return h;
+  return `${h} a ${HOURS[i+1]}`;
+}
+
 function getHoursBetween(start:string,end:string):string[]{
   const si=HOURS.indexOf(start),ei=HOURS.indexOf(end);
   if(si===-1||ei===-1||ei<si)return[start];
@@ -110,6 +117,11 @@ function getHoursBetween(start:string,end:string):string[]{
 }
 function getEndHourOptions(h:string):string[]{
   const i=HOURS.indexOf(h); return i===-1?[]:HOURS.slice(i);
+}
+
+// ← CAMBIO: fecha de hoy en YYYY-MM-DD
+function todayStr(): string {
+  return new Date().toISOString().slice(0, 10);
 }
 
 async function exportToExcel(data:any[],filters:{program:string;teacher:string}){
@@ -434,22 +446,20 @@ function LoginScreen({onLogin}:{onLogin:(s:any,p:any)=>void}){
 
 export default function App(){
   const { theme, toggle, T } = useTheme();
-  const { isMobile } = useBreakpoint(); // ← BREAKPOINT
-  const [mobileTab, setMobileTab] = useState<"grid"|"admin">("grid"); // ← TAB MÓVIL
+  const { isMobile } = useBreakpoint();
+  const [mobileTab, setMobileTab] = useState<"grid"|"admin">("grid");
   const [extraModal, setExtraModal] = useState<{room:string;reservations:any[]}|null>(null);
 
   const S: Record<string,any> = {
-    page: {width:"100%",minHeight:"100vh",background:T.bg,fontFamily:"'Inter',system-ui,sans-serif",color:T.text,overflowX:"hidden" as const,
-      // Espacio extra abajo en móvil para la bottom nav
-      paddingBottom: isMobile ? 64 : 0,
-    },
+    page: {width:"100%",minHeight:"100vh",background:T.bg,fontFamily:"'Inter',system-ui,sans-serif",color:T.text,overflowX:"hidden" as const,paddingBottom: isMobile ? 64 : 0},
     hdr: {width:"100%",background:T.bg3,borderBottom:`1px solid ${T.border}`,padding:"0 12px",height:56,display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky" as const,top:0,zIndex:50,backdropFilter:"blur(10px)",boxSizing:"border-box" as const},
     addBtn:    {background:`linear-gradient(135deg,${T.udBlue},${T.udAccent})`,color:"#fff",border:"none",borderRadius:8,padding:"8px 16px",fontSize:13,fontWeight:600,cursor:"pointer",display:"flex",alignItems:"center",gap:6,boxShadow:`0 4px 15px rgba(0,102,204,0.3)`,minHeight:44},
     outlineBtn:{background:"transparent",border:`1px solid ${T.border}`,color:T.mutedL,borderRadius:8,padding:"7px 12px",fontSize:12,cursor:"pointer",minHeight:44},
     sCard:     {background:T.card,borderRadius:12,border:`1px solid ${T.border}`,padding:"16px 18px",display:"flex",alignItems:"center",gap:12,transition:"transform .2s,box-shadow .2s"},
     gridWrap:  {width:"100%",background:T.bg2,borderRadius:12,border:`1px solid ${T.border}`,overflow:"hidden"},
     th:        {color:T.muted,fontWeight:600,padding:"8px 6px",borderRight:`1px solid ${T.border}`,borderBottom:`1px solid ${T.border}`,textAlign:"center" as const,fontSize:10,minWidth:98,background:T.bg3},
-    hourTd:    {position:"sticky" as const,left:0,zIndex:10,background:T.bg2,color:T.mutedL,fontFamily:"monospace",fontWeight:700,padding:"4px 10px",borderRight:`1px solid ${T.border}`,borderBottom:`1px solid ${T.border}`,textAlign:"center" as const,fontSize:11,width:58},
+    // ← CAMBIO: hourTd más ancho para mostrar rango
+    hourTd:    {position:"sticky" as const,left:0,zIndex:10,background:T.bg2,color:T.mutedL,fontFamily:"monospace",fontWeight:700,padding:"4px 6px",borderRight:`1px solid ${T.border}`,borderBottom:`1px solid ${T.border}`,textAlign:"center" as const,fontSize:10,width:80},
     cell:      {borderRight:`1px solid ${T.border}`,borderBottom:`1px solid ${T.border}`,padding:2,height:56,verticalAlign:"top" as const},
     overlay:   {position:"fixed" as const,inset:0,zIndex:100,display:"flex",alignItems:"center",justifyContent:"center",padding:16,background:"rgba(0,0,0,0.85)",backdropFilter:"blur(8px)"},
     mBox:      {background:T.bg3,borderRadius:16,border:`1px solid ${T.border2}`,width:"100%",maxWidth:480,boxShadow:T.shadow,maxHeight:"90vh",overflowY:"auto" as const},
@@ -575,9 +585,11 @@ export default function App(){
   },[reservations,searchQuery]);
 
   const resMap=useMemo(()=>{
+    const today = todayStr(); // ← CAMBIO
     const m:Record<string,any>={};
     reservations
       .filter(r=>vistaEspacio==="lab"?r.tipo_espacio==="lab":r.tipo_espacio!=="lab")
+      .filter(r=>!r.specific_date || r.specific_date >= today) // ← CAMBIO: ocultar pasadas
       .forEach(r=>{
         getHoursBetween(r.hour,r.hour_end||r.hour).forEach(h=>{
           m[`${r.day}|${h}|${r.room}`]=r;
@@ -587,10 +599,12 @@ export default function App(){
   },[reservations,vistaEspacio]);
 
   const extraCountMap = useMemo(()=>{
+    const today = todayStr(); // ← CAMBIO
     const m: Record<string,any[]> = {};
     reservations
       .filter(r=>(r.tipo_reserva==="extraordinaria"||r.tipo_reserva==="bloqueo")&&
         (vistaEspacio==="lab"?r.tipo_espacio==="lab":r.tipo_espacio!=="lab"))
+      .filter(r=>!r.specific_date || r.specific_date >= today) // ← CAMBIO: ocultar pasadas
       .forEach(r=>{
         getHoursBetween(r.hour,r.hour_end||r.hour).forEach(h=>{
           const key=`${r.day}|${h}|${r.room}`;
@@ -665,7 +679,6 @@ export default function App(){
 
   const isSearchActive=searchQuery.trim().length>0;
 
-  // ── MENÚ ADMIN MÓVIL ────────────────────────────────────────────────────────
   const MobileAdminMenu = () => (
     <div style={{padding:16,display:"flex",flexDirection:"column",gap:10}}>
       <div style={{fontSize:12,fontWeight:700,color:T.muted,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:4}}>
@@ -722,7 +735,6 @@ export default function App(){
       <style>{globalStyle}</style>
       <div style={S.page}>
 
-        {/* HEADER */}
         <header style={S.hdr}>
           <div style={{display:"flex",alignItems:"center",gap:8}}>
             <UDLogo/>
@@ -736,7 +748,6 @@ export default function App(){
           </div>
 
           <div style={{display:"flex",alignItems:"center",gap:6}} className="header-actions">
-            {/* Buscador — solo desktop */}
             <div style={{position:"relative"}} className="hide-mobile">
               <input type="text" placeholder="🔍 Buscar docente, asignatura…"
                 value={searchQuery} onChange={e=>setSearchQuery(e.target.value)}
@@ -746,14 +757,10 @@ export default function App(){
                 <button onClick={()=>setSearchQuery("")} style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",background:"transparent",border:"none",color:T.muted,cursor:"pointer",fontSize:14}}>✕</button>
               )}
             </div>
-
-            {/* Indicador online — solo desktop */}
             <div style={{display:"flex",alignItems:"center",gap:5,fontSize:11,color:loading?"#f59e0b":"#4ade80"}} className="hide-mobile">
               <span style={{width:7,height:7,borderRadius:"50%",background:loading?"#f59e0b":"#4ade80",boxShadow:`0 0 6px ${loading?"#f59e0b":"#4ade80"}`,display:"inline-block"}}/>
               {loading?"Sync…":"Online"}
             </div>
-
-            {/* Toast */}
             {toast.msg&&(
               <span style={{fontSize:11,padding:"5px 10px",borderRadius:8,
                 color:toast.type==="err"?"#f87171":toast.type==="warn"?"#fb923c":"#4ade80",
@@ -762,8 +769,6 @@ export default function App(){
                 {toast.msg}
               </span>
             )}
-
-            {/* Perfil — solo desktop */}
             <div style={{display:"flex",alignItems:"center",gap:8,background:T.bg3,borderRadius:8,padding:"6px 12px",border:`1px solid ${T.border}`}} className="hide-mobile">
               <div style={{width:28,height:28,borderRadius:"50%",background:`linear-gradient(135deg,${T.udBlue},${T.udAccent})`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14}}>
                 {roleInfo.icon}
@@ -773,24 +778,18 @@ export default function App(){
                 <div style={{fontSize:10,color:roleInfo.color}}>{roleInfo.label}{profile?.program?` · ${profile.program}`:""}</div>
               </div>
             </div>
-
-            {/* Botones acción — solo desktop */}
             <button style={S.outlineBtn} onClick={()=>setExportModal(true)} className="hide-mobile">📊 Exportar</button>
             {isSuperAdmin&&<button style={{...S.outlineBtn,borderColor:T.udAccent,color:"#60a5fa"}} onClick={()=>setAutoScheduler(true)} className="hide-mobile">🤖 Auto-Horario</button>}
             {isSuperAdmin&&<button style={{...S.outlineBtn,borderColor:"#a78bfa",color:"#a78bfa"}} onClick={()=>setSpacesModal(true)} className="hide-mobile">🏛️ Espacios</button>}
             {isSuperAdmin&&<button style={{...S.outlineBtn,borderColor:"#4ade80",color:"#4ade80"}} onClick={()=>setReservasExt(true)} className="hide-mobile">⭐ Reservas</button>}
             {isSuperAdmin&&<button style={{...S.outlineBtn,borderColor:"#f472b6",color:"#f472b6"}} onClick={()=>setDashboard(true)} className="hide-mobile">📊 Dashboard</button>}
             {(isSuperAdmin||isEditor)&&<button style={{...S.outlineBtn,borderColor:"#60a5fa",color:"#60a5fa"}} onClick={()=>setTeacherView(true)} className="hide-mobile">👤 Docentes</button>}
-
-            {/* THEME TOGGLE — visible en todos */}
             <button onClick={toggle} title={theme==="dark"?"Modo claro":"Modo oscuro"}
               style={{background:"transparent",border:`1px solid ${T.border2}`,borderRadius:8,
                 padding:"6px 10px",cursor:"pointer",fontSize:16,color:T.text,
                 minWidth:44,minHeight:44,display:"flex",alignItems:"center",justifyContent:"center"}}>
               {theme==="dark"?"☀️":"🌙"}
             </button>
-
-            {/* Nueva reserva — solo desktop */}
             {canCreate&&(
               <button style={S.addBtn} onClick={()=>openModal()} className="hide-mobile">
                 <span style={{fontSize:16,lineHeight:1}}>＋</span>
@@ -801,15 +800,12 @@ export default function App(){
           </div>
         </header>
 
-        {/* ── CONTENIDO PRINCIPAL ──────────────────────────────────────────── */}
         {isMobile ? (
-          // ════ VISTA MÓVIL ════
           <div style={{flex:1}}>
             {mobileTab === "grid" ? (
               <MobileGrid
                 reservations={reservations}
                 onCellClick={r => {
-                  // Abre modal de detalle extraordinaria si aplica
                   if(r.tipo_reserva==="extraordinaria"||r.tipo_reserva==="bloqueo"){
                     const roomExtras = reservations.filter(x=>
                       x.room===r.room && x.day===r.day &&
@@ -824,10 +820,8 @@ export default function App(){
             )}
           </div>
         ) : (
-          // ════ VISTA DESKTOP ════
           <div style={{width:"100%",padding:"16px 20px",boxSizing:"border-box"}}>
 
-            {/* SEARCH BANNER */}
             {isSearchActive&&(
               <div style={{background:"rgba(0,102,204,0.1)",border:`1px solid rgba(0,102,204,0.3)`,borderRadius:10,padding:"10px 16px",marginBottom:16,fontSize:13,color:"#93c5fd",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
                 <span>🔍 "<b>{searchQuery}</b>" — <b style={{color:"#60a5fa"}}>{highlightedIds.size}</b> resultado{highlightedIds.size!==1?"s":""}</span>
@@ -838,7 +832,6 @@ export default function App(){
               </div>
             )}
 
-            {/* STATS */}
             <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginBottom:20}} className="stats-grid">
               {Object.entries(PROGRAMS).map(([prog,{color,icon,iconBg}])=>{
                 const n=reservations.filter(r=>r.program===prog).length;
@@ -857,7 +850,6 @@ export default function App(){
               })}
             </div>
 
-            {/* ROLE BANNERS */}
             {!canCreate&&(
               <div style={{background:`rgba(0,102,204,0.08)`,border:`1px solid rgba(0,102,204,0.2)`,borderRadius:10,padding:"10px 16px",marginBottom:16,fontSize:13,color:"#93c5fd",display:"flex",gap:8}}>
                 👁️ Estás en <b>modo lectura</b>. Contacta al administrador para obtener acceso.
@@ -869,7 +861,6 @@ export default function App(){
               </div>
             )}
 
-            {/* SELECTOR VISTA */}
             <div style={{display:"flex",gap:8,marginBottom:16,alignItems:"center"}}>
               <span style={{fontSize:12,color:T.muted,fontWeight:600}}>Vista:</span>
               <button onClick={()=>setVistaEspacio("teoria")}
@@ -885,7 +876,6 @@ export default function App(){
               </span>
             </div>
 
-            {/* DAY TABS */}
             <div style={{display:"flex",gap:8,marginBottom:16,flexWrap:"wrap"}} className="day-tabs">
               {DAYS.map(d=>{
                 const n=reservations.filter(r=>r.day===d).length;
@@ -900,7 +890,6 @@ export default function App(){
               })}
             </div>
 
-            {/* GRID */}
             {loading?(
               <div style={{...S.gridWrap,padding:60,textAlign:"center"}}>
                 <div style={{fontSize:40,marginBottom:16}}>⚛️</div>
@@ -932,10 +921,11 @@ export default function App(){
                   </div>
                 </div>
                 <div style={{overflowX:"auto"}}>
-                  <table style={{borderCollapse:"collapse",minWidth:currentRooms.length*100+70}}>
+                  <table style={{borderCollapse:"collapse",minWidth:currentRooms.length*100+90}}>
                     <thead>
                       <tr>
-                        <th style={{...S.th,position:"sticky" as const,left:0,zIndex:10,textAlign:"left" as const,paddingLeft:10,width:58}}>Hora</th>
+                        {/* ← CAMBIO: header Hora más ancho */}
+                        <th style={{...S.th,position:"sticky" as const,left:0,zIndex:10,textAlign:"left" as const,paddingLeft:8,width:80}}>Hora</th>
                         {currentRooms.map(room=>(
                           <th key={room} style={S.th}>
                             <span style={{display:"block",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:90}} title={room}>{room}</span>
@@ -946,7 +936,13 @@ export default function App(){
                     <tbody>
                       {currentHours.map(hour=>(
                         <tr key={hour} style={{background:T.bg2}}>
-                          <td style={S.hourTd}>{hour}</td>
+                          {/* ← CAMBIO: mostrar rango "06:00 a 07:00" */}
+                          <td style={S.hourTd}>
+                            <span style={{display:"block",fontSize:11,fontWeight:700}}>{hour}</span>
+                            <span style={{display:"block",fontSize:9,color:T.muted,fontWeight:400}}>
+                              a {HOURS[HOURS.indexOf(hour)+1] || hour}
+                            </span>
+                          </td>
                           {currentRooms.map(room=>{
                             const res=resMap[`${selDay}|${hour}|${room}`];
                             const spaceConfig=spacesLoaded?spaces.find(s=>s.nombre===room):null;
@@ -1050,23 +1046,15 @@ export default function App(){
           </div>
         )}
 
-        {/* ── BOTTOM NAV (solo móvil) ─────────────────────────────────────── */}
         {isMobile&&(
-          <nav style={{
-            position:"fixed",bottom:0,left:0,right:0,zIndex:100,
-            background:T.bg2,borderTop:`1px solid ${T.border}`,
-            display:"flex",height:60,
-            paddingBottom:"env(safe-area-inset-bottom)",
-          }}>
+          <nav style={{position:"fixed",bottom:0,left:0,right:0,zIndex:100,background:T.bg2,borderTop:`1px solid ${T.border}`,display:"flex",height:60,paddingBottom:"env(safe-area-inset-bottom)"}}>
             {[
               {key:"grid",  icon:"📅", label:"Horario"},
               {key:"admin", icon:"⚙️",  label:"Gestión"},
             ].map(item=>(
               <button key={item.key} onClick={()=>setMobileTab(item.key as any)} style={{
-                flex:1,display:"flex",flexDirection:"column",
-                alignItems:"center",justifyContent:"center",
-                gap:2,border:"none",cursor:"pointer",
-                background:"transparent",
+                flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
+                gap:2,border:"none",cursor:"pointer",background:"transparent",
                 color:mobileTab===item.key?T.udAccent:T.muted,
                 fontSize:10,fontWeight:600,
                 borderTop:mobileTab===item.key?`2px solid ${T.udAccent}`:"2px solid transparent",
@@ -1079,7 +1067,6 @@ export default function App(){
           </nav>
         )}
 
-        {/* ── MODALES (todos, desktop y móvil) ───────────────────────────── */}
         {exportModal&&<ExportModal reservations={reservations} onClose={()=>setExportModal(false)}/>}
         {searchOpen&&<SearchModal reservations={reservations} query={searchQuery} onClose={()=>setSearchOpen(false)} onJump={d=>{setSelDay(d);}}/>}
         {autoScheduler&&(
@@ -1094,7 +1081,6 @@ export default function App(){
         )}
         {teacherView&&<TeacherView reservations={reservations} onClose={()=>setTeacherView(false)}/>}
 
-        {/* Modal detalle extraordinarias */}
         {extraModal&&(
           <div style={S.overlay} onClick={e=>{if(e.target===e.currentTarget)setExtraModal(null);}}>
             <div style={{...S.mBox,maxWidth:520}}>
@@ -1117,7 +1103,10 @@ export default function App(){
                     <div key={r.id} style={{background:T.bg2,borderRadius:10,padding:"12px 16px",border:`1px solid rgba(147,51,234,0.3)`,borderLeft:`3px solid ${isBloqueo?"#ef4444":"#9333ea"}`}}>
                       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
                         <span style={{fontSize:12,fontWeight:700,color:isBloqueo?"#f87171":"#c084fc"}}>{isBloqueo?"🔒 Bloqueo":"⭐ Extraordinaria"}</span>
-                        <span style={{fontSize:11,color:T.muted,background:T.bg3,padding:"2px 10px",borderRadius:99}}>{r.hour}{r.hour_end&&r.hour_end!==r.hour?` → ${r.hour_end}`:""}</span>
+                        {/* ← CAMBIO: rango de hora en modal detalle */}
+                        <span style={{fontSize:11,color:T.muted,background:T.bg3,padding:"2px 10px",borderRadius:99}}>
+                          {r.hour_end && r.hour_end !== r.hour ? `${r.hour} a ${r.hour_end}` : hourRangeLabel(r.hour)}
+                        </span>
                       </div>
                       <div style={{fontSize:13,color:T.text,fontWeight:600,marginBottom:4}}>📅 {fechaStr}</div>
                       {r.subject&&<div style={{fontSize:12,color:T.mutedL,marginBottom:2}}>📚 {r.subject}</div>}
@@ -1135,7 +1124,6 @@ export default function App(){
           </div>
         )}
 
-        {/* Modal nueva reserva */}
         {modal&&canCreate&&(
           <div style={S.overlay} onClick={e=>{if(e.target===e.currentTarget)closeModal();}}>
             <div style={S.mBox}>
@@ -1189,24 +1177,37 @@ export default function App(){
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
                   <div>
                     <label style={S.lbl}>Hora inicio *</label>
+                    {/* ← CAMBIO: muestra rango en selector */}
                     <select style={S.sel} value={form.hour} onChange={e=>upd({hour:e.target.value,hour_end:e.target.value})}>
                       <option value="">Seleccionar</option>
-                      {HOURS.map(h=><option key={h}>{h}</option>)}
+                      {HOURS.slice(0,-1).map((h,i)=>(
+                        <option key={h} value={h}>{h} a {HOURS[i+1]}</option>
+                      ))}
                     </select>
                   </div>
                   <div>
                     <label style={S.lbl}>Hora fin *</label>
+                    {/* ← CAMBIO: muestra rango consolidado en selector fin */}
                     <select style={S.sel} value={form.hour_end} disabled={!form.hour} onChange={e=>upd({hour_end:e.target.value})}>
                       <option value="">Seleccionar</option>
-                      {getEndHourOptions(form.hour).map(h=><option key={h}>{h}</option>)}
+                      {getEndHourOptions(form.hour).slice(1).map((h,i)=>(
+                        <option key={h} value={h}>
+                          {form.hour} a {h} ({i+1} hora{i!==0?"s":""})
+                        </option>
+                      ))}
                     </select>
                   </div>
                 </div>
                 {form.hour&&form.hour_end&&(
                   <div style={{background:T.bg,borderRadius:8,padding:"10px 14px",border:`1px solid ${T.border}`,fontSize:12}}>
                     <span style={{color:T.muted}}>Bloques: </span>
-                    <span style={{color:"#60a5fa",fontWeight:600}}>{getHoursBetween(form.hour,form.hour_end).join(" · ")}</span>
-                    <span style={{color:T.muted,marginLeft:8}}>({getHoursBetween(form.hour,form.hour_end).length}h)</span>
+                    <span style={{color:"#60a5fa",fontWeight:600}}>
+                      {/* ← CAMBIO: mostrar bloques como rangos */}
+                      {getHoursBetween(form.hour,form.hour_end).slice(0,-1).map((h,i,arr)=>(
+                        `${h} a ${HOURS[HOURS.indexOf(h)+1]}`
+                      )).join(" · ")}
+                    </span>
+                    <span style={{color:T.muted,marginLeft:8}}>({getHoursBetween(form.hour,form.hour_end).length-1}h)</span>
                   </div>
                 )}
                 <div>
