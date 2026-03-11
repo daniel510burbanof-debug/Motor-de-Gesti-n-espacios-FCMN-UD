@@ -18,7 +18,7 @@ const PROG_COLORS: Record<string,string> = {
 
 const REQUIRED_COLUMNS = [
   "Tipo","Descripcion","Programa","Responsable",
-  "Espacio","Dia","Fecha","Hora_Inicio","Duracion_Horas",
+  "Espacio","Dia","Fecha","Hora_Inicio","Hora_Fin",
 ];
 
 interface ReservasExtraordinariaProps {
@@ -108,25 +108,30 @@ function parseExcelMasivo(
     const dia        = String(row["Dia"] || "").trim();
     const fecha      = String(row["Fecha"] || "").trim();
     const horaInicio = String(row["Hora_Inicio"] || "").trim();
-    const durRaw     = parseInt(String(row["Duracion_Horas"] || "1"));
+    const horaFin = String(row["Hora_Fin"] || "").trim();
 
-    if (!["extraordinaria","bloqueo"].includes(tipo)) {
-      errors.push(`Fila ${lineNum}: Tipo debe ser "extraordinaria" o "bloqueo".`); return;
-    }
-    if (!descripcion && tipo !== "bloqueo") {
-      errors.push(`Fila ${lineNum}: Descripcion es obligatoria.`); return;
-    }
-    if (!DAYS.includes(dia)) {
-      errors.push(`Fila ${lineNum}: Dia "${dia}" no válido.`); return;
-    }
-    if (!HOURS.includes(horaInicio)) {
-      errors.push(`Fila ${lineNum}: Hora_Inicio "${horaInicio}" no válida.`); return;
-    }
-    if (!activeSpaceNames.includes(espacio)) {
-      errors.push(`Fila ${lineNum}: Espacio "${espacio}" no encontrado o inactivo.`); return;
-    }
-    const duracion = isNaN(durRaw) || durRaw < 1 ? 1 : Math.min(durRaw, 8);
-    const hourEnd  = calcHourEnd(horaInicio, duracion);
+if (!["extraordinaria","bloqueo"].includes(tipo)) {
+  errors.push(`Fila ${lineNum}: Tipo debe ser "extraordinaria" o "bloqueo".`); return;
+}
+if (!descripcion && tipo !== "bloqueo") {
+  errors.push(`Fila ${lineNum}: Descripcion es obligatoria.`); return;
+}
+if (!DAYS.includes(dia)) {
+  errors.push(`Fila ${lineNum}: Dia "${dia}" no válido.`); return;
+}
+if (!HOURS.includes(horaInicio)) {
+  errors.push(`Fila ${lineNum}: Hora_Inicio "${horaInicio}" no válida.`); return;
+}
+if (!HOURS.includes(horaFin)) {
+  errors.push(`Fila ${lineNum}: Hora_Fin "${horaFin}" no válida.`); return;
+}
+if (horaFin <= horaInicio) {
+  errors.push(`Fila ${lineNum}: Hora_Fin debe ser mayor que Hora_Inicio.`); return;
+}
+if (!activeSpaceNames.includes(espacio)) {
+  errors.push(`Fila ${lineNum}: Espacio "${espacio}" no encontrado o inactivo.`); return;
+}
+const hourEnd = horaFin;
 
     rows.push({
       tipo_reserva:  tipo,
@@ -327,10 +332,10 @@ export default function ReservasExtraordinarias({
     const example = [
       { Tipo:"extraordinaria", Descripcion:"Seminario de Bioquímica", Programa:"Química",
         Responsable:"Dr. Juan Pérez", Espacio:"Lab 1 Qca", Dia:"Lunes",
-        Fecha:"2026-04-15", Hora_Inicio:"08:00", Duracion_Horas:2 },
+        Fecha:"2026-04-15", Hora_Inicio:"08:00", Hora_Fin:"10:00" },
       { Tipo:"bloqueo", Descripcion:"Mantenimiento", Programa:"Otro",
         Responsable:"Administración", Espacio:"1001", Dia:"Martes",
-        Fecha:"2026-04-16", Hora_Inicio:"10:00", Duracion_Horas:3 },
+        Fecha:"2026-04-16", Hora_Inicio:"10:00", Hora_Fin:"13:00" },
     ];
     const ws = XLSX.utils.json_to_sheet(example);
     ws["!cols"] = REQUIRED_COLUMNS.map(() => ({ wch:20 }));
@@ -562,7 +567,7 @@ export default function ReservasExtraordinarias({
                     ["Dia",            "Lunes | Martes | ... | Sábado"],
                     ["Fecha",          "YYYY-MM-DD (ej: 2026-04-15)"],
                     ["Hora_Inicio",    "06:00 a 19:00"],
-                    ["Duracion_Horas", "1 a 8"],
+                    ["Hora_Fin", "07:00 a 19:00"],
                   ].map(([col, desc]) => (
                     <div key={col} style={{ display:"flex", gap:6, fontSize:11 }}>
                       <span style={{ color:"#60a5fa", fontWeight:700,
