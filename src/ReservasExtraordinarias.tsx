@@ -37,7 +37,6 @@ const EMPTY = {
   notes:"",
 };
 
-// PUNTO 3 & 4: Calcula hora fin
 function calcHourEnd(start: string, duracion: number): string {
   const idx = HOURS.indexOf(start);
   if (idx === -1) return start;
@@ -45,7 +44,6 @@ function calcHourEnd(start: string, duracion: number): string {
   return HOURS[endIdx];
 }
 
-// PUNTO 3: Formatea rango "08:00 a 09:00"
 function formatHourRange(start: string, end: string): string {
   if (!start) return "";
   if (!end || end === start) {
@@ -56,7 +54,6 @@ function formatHourRange(start: string, end: string): string {
   return `${start} a ${end}`;
 }
 
-// PUNTO 3: Lista de bloques individuales
 function getFormattedBlocks(start: string, end: string): string[] {
   const si = HOURS.indexOf(start);
   const ei = HOURS.indexOf(end);
@@ -68,7 +65,6 @@ function getFormattedBlocks(start: string, end: string): string[] {
   return blocks;
 }
 
-// PUNTO 1: Hoy en YYYY-MM-DD
 function todayStr(): string {
   return new Date().toISOString().slice(0, 10);
 }
@@ -77,7 +73,6 @@ function isUpcoming(r: any): boolean {
   return r.specific_date >= todayStr();
 }
 
-// PUNTO 2: Parser Excel masivo
 function parseExcelMasivo(
   buffer: ArrayBuffer, spaces: any[]
 ): { rows: any[]; errors: string[] } {
@@ -108,30 +103,30 @@ function parseExcelMasivo(
     const dia        = String(row["Dia"] || "").trim();
     const fecha      = String(row["Fecha"] || "").trim();
     const horaInicio = String(row["Hora_Inicio"] || "").trim();
-    const horaFin = String(row["Hora_Fin"] || "").trim();
+    const horaFin    = String(row["Hora_Fin"] || "").trim();
 
-if (!["extraordinaria","bloqueo"].includes(tipo)) {
-  errors.push(`Fila ${lineNum}: Tipo debe ser "extraordinaria" o "bloqueo".`); return;
-}
-if (!descripcion && tipo !== "bloqueo") {
-  errors.push(`Fila ${lineNum}: Descripcion es obligatoria.`); return;
-}
-if (!DAYS.includes(dia)) {
-  errors.push(`Fila ${lineNum}: Dia "${dia}" no válido.`); return;
-}
-if (!HOURS.includes(horaInicio)) {
-  errors.push(`Fila ${lineNum}: Hora_Inicio "${horaInicio}" no válida.`); return;
-}
-if (!HOURS.includes(horaFin)) {
-  errors.push(`Fila ${lineNum}: Hora_Fin "${horaFin}" no válida.`); return;
-}
-if (horaFin <= horaInicio) {
-  errors.push(`Fila ${lineNum}: Hora_Fin debe ser mayor que Hora_Inicio.`); return;
-}
-if (!activeSpaceNames.includes(espacio)) {
-  errors.push(`Fila ${lineNum}: Espacio "${espacio}" no encontrado o inactivo.`); return;
-}
-const hourEnd = horaFin;
+    if (!["extraordinaria","bloqueo"].includes(tipo)) {
+      errors.push(`Fila ${lineNum}: Tipo debe ser "extraordinaria" o "bloqueo".`); return;
+    }
+    if (!descripcion && tipo !== "bloqueo") {
+      errors.push(`Fila ${lineNum}: Descripcion es obligatoria.`); return;
+    }
+    if (!DAYS.includes(dia)) {
+      errors.push(`Fila ${lineNum}: Dia "${dia}" no válido.`); return;
+    }
+    if (!HOURS.includes(horaInicio)) {
+      errors.push(`Fila ${lineNum}: Hora_Inicio "${horaInicio}" no válida.`); return;
+    }
+    if (!HOURS.includes(horaFin)) {
+      errors.push(`Fila ${lineNum}: Hora_Fin "${horaFin}" no válida.`); return;
+    }
+    if (horaFin <= horaInicio) {
+      errors.push(`Fila ${lineNum}: Hora_Fin debe ser mayor que Hora_Inicio.`); return;
+    }
+    if (!activeSpaceNames.includes(espacio)) {
+      errors.push(`Fila ${lineNum}: Espacio "${espacio}" no encontrado o inactivo.`); return;
+    }
+    const hourEnd = horaFin;
 
     rows.push({
       tipo_reserva:  tipo,
@@ -149,30 +144,33 @@ const hourEnd = horaFin;
 
   return { rows, errors };
 }
+
 export default function ReservasExtraordinarias({
   session, reservations, spaces, onClose, onSaved
 }: ReservasExtraordinariaProps) {
   const { T } = useTheme();
   const { isMobile } = useBreakpoint();
 
-  const [form,         setForm]         = useState(EMPTY);
-  const [error,        setError]        = useState("");
-  const [saving,       setSaving]       = useState(false);
-  const [toast,        setToast]        = useState("");
-  const [tab,          setTab]          = useState<"crear"|"disponibles"|"lista"|"masivo">("crear");
-  const [nowFree,      setNowFree]      = useState<any[]>([]);
-  const [filterTipo,   setFilterTipo]   = useState<"all"|"extraordinaria"|"bloqueo">("all");
-  const [showPast,     setShowPast]     = useState(false);
-  const [bulkDragOver, setBulkDragOver] = useState(false);
-  const [bulkRows,     setBulkRows]     = useState<any[]>([]);
-  const [bulkErrors,   setBulkErrors]   = useState<string[]>([]);
-  const [bulkSaving,   setBulkSaving]   = useState(false);
+  const [form,          setForm]          = useState(EMPTY);
+  const [error,         setError]         = useState("");
+  const [saving,        setSaving]        = useState(false);
+  const [toast,         setToast]         = useState("");
+  const [tab,           setTab]           = useState<"crear"|"disponibles"|"lista"|"masivo">("crear");
+  const [nowFree,       setNowFree]       = useState<any[]>([]);
+  const [filterTipo,    setFilterTipo]    = useState<"all"|"extraordinaria"|"bloqueo">("all");
+  const [showPast,      setShowPast]      = useState(false);
+  const [bulkDragOver,  setBulkDragOver]  = useState(false);
+  const [bulkRows,      setBulkRows]      = useState<any[]>([]);
+  const [bulkErrors,    setBulkErrors]    = useState<string[]>([]);
+  const [bulkSaving,    setBulkSaving]    = useState(false);
   const [bulkSavedCount,setBulkSavedCount]= useState(0);
+  // ← CAMBIO 1: estados para borrado total
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting,      setDeleting]      = useState(false);
 
   const token = session?.access_token;
   const upd = (p: any) => setForm(f => ({ ...f, ...p }));
 
-  // PUNTO 4: recalcula hour_end al cambiar hora o duración
   const handleHourChange = (hour: string) => {
     upd({ hour, hour_end: calcHourEnd(hour, form.duracion) });
   };
@@ -211,7 +209,6 @@ export default function ReservasExtraordinarias({
     reservations.filter(r => r.tipo_reserva === "extraordinaria" || r.tipo_reserva === "bloqueo")
   , [reservations]);
 
-  // PUNTO 1: filtro fechas
   const filtered = useMemo(() => {
     let base = filterTipo === "all" ? extraordinary
       : extraordinary.filter(r => r.tipo_reserva === filterTipo);
@@ -274,6 +271,32 @@ export default function ReservasExtraordinarias({
       setForm(EMPTY); onSaved();
     } catch { setError("Error al guardar. Intenta de nuevo."); }
     finally { setSaving(false); }
+  };
+
+  // ← CAMBIO 1: función borrado total
+  const handleDeleteAll = async () => {
+    try {
+      setDeleting(true);
+      const res = await fetch(
+        `${SUPABASE_URL}/rest/v1/reservations?or=(tipo_reserva.eq.extraordinaria,tipo_reserva.eq.bloqueo)`,
+        {
+          method: "DELETE",
+          headers: {
+            apikey: SUPABASE_KEY,
+            Authorization: `Bearer ${token}`,
+            Prefer: "return=minimal",
+          },
+        }
+      );
+      if (!res.ok) throw new Error("Error al borrar");
+      showToast("✓ Todas las reservas extraordinarias eliminadas");
+      setConfirmDelete(false);
+      onSaved();
+    } catch {
+      showToast("❌ Error al eliminar");
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const checkAvailableNow = () => {
@@ -362,13 +385,20 @@ export default function ReservasExtraordinarias({
               Investigación · Eventos · Bloqueos · Carga masiva
             </div>
           </div>
-          <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+          <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" as const }}>
             {toast && (
               <span style={{ fontSize:12, padding:"6px 12px", borderRadius:8, color:"#4ade80",
                 background:"rgba(74,222,128,0.1)", border:"1px solid rgba(74,222,128,0.25)" }}>
                 {toast}
               </span>
             )}
+            {/* ← CAMBIO 1: botón borrar todas */}
+            <button onClick={() => setConfirmDelete(true)}
+              style={{ ...S.btn("rgba(239,68,68,0.15)"), color:"#f87171",
+                border:"1px solid rgba(239,68,68,0.35)", fontSize:12,
+                display:"flex", alignItems:"center", gap:6 }}>
+              🗑️ Borrar todas
+            </button>
             <button onClick={checkAvailableNow}
               style={{ ...S.btn("linear-gradient(135deg,#059669,#10b981)"),
                 fontSize:12, display:"flex", alignItems:"center", gap:6 }}>
@@ -500,7 +530,6 @@ export default function ReservasExtraordinarias({
                 </div>
               </div>
 
-              {/* Preview bloques — PUNTO 3 & 4 */}
               {form.hour && form.hour_end && (
                 <div style={{ background:T.bg2, borderRadius:8, padding:"10px 14px",
                   border:`1px solid ${T.border}` }}>
@@ -559,15 +588,15 @@ export default function ReservasExtraordinarias({
                 <div style={{ display:"grid",
                   gridTemplateColumns: isMobile ? "1fr" : "repeat(3,1fr)", gap:6 }}>
                   {[
-                    ["Tipo",           "extraordinaria | bloqueo"],
-                    ["Descripcion",    "Nombre del evento"],
-                    ["Programa",       "Química | Biología | Física | Matemáticas | Otro"],
-                    ["Responsable",    "Nombre del responsable"],
-                    ["Espacio",        "Nombre exacto del espacio"],
-                    ["Dia",            "Lunes | Martes | ... | Sábado"],
-                    ["Fecha",          "YYYY-MM-DD (ej: 2026-04-15)"],
-                    ["Hora_Inicio",    "06:00 a 19:00"],
-                    ["Hora_Fin", "07:00 a 19:00"],
+                    ["Tipo",        "extraordinaria | bloqueo"],
+                    ["Descripcion", "Nombre del evento"],
+                    ["Programa",    "Química | Biología | Física | Matemáticas | Otro"],
+                    ["Responsable", "Nombre del responsable"],
+                    ["Espacio",     "Nombre exacto del espacio"],
+                    ["Dia",         "Lunes | Martes | ... | Sábado"],
+                    ["Fecha",       "YYYY-MM-DD (ej: 2026-04-15)"],
+                    ["Hora_Inicio", "06:00 a 19:00"],
+                    ["Hora_Fin",    "07:00 a 19:00"],
                   ].map(([col, desc]) => (
                     <div key={col} style={{ display:"flex", gap:6, fontSize:11 }}>
                       <span style={{ color:"#60a5fa", fontWeight:700,
@@ -748,7 +777,6 @@ export default function ReservasExtraordinarias({
                     {k==="all" ? "Todas" : k==="extraordinaria" ? "⭐ Extraordinarias" : "🔒 Bloqueos"}
                   </button>
                 ))}
-                {/* PUNTO 1: Toggle pasadas */}
                 {pastCount > 0 && (
                   <button onClick={() => setShowPast(p => !p)}
                     style={{ padding:"6px 14px", borderRadius:8, fontSize:12,
@@ -790,7 +818,6 @@ export default function ReservasExtraordinarias({
                         marginBottom:4 }}>
                         {r.tipo_reserva==="bloqueo"?"🔒":"⭐"} {r.subject}
                       </div>
-                      {/* PUNTO 3: rango en listado */}
                       <div style={{ fontSize:11, color:T.muted }}>
                         📍 {r.room} · {r.day}
                         {r.specific_date
@@ -829,6 +856,40 @@ export default function ReservasExtraordinarias({
 
         </div>
       </div>
+
+      {/* ← CAMBIO 1: Modal de confirmación borrado total */}
+      {confirmDelete && (
+        <div style={{ position:"fixed", inset:0, zIndex:300,
+          display:"flex", alignItems:"center", justifyContent:"center",
+          background:"rgba(0,0,0,0.85)", backdropFilter:"blur(8px)", padding:16 }}>
+          <div style={{ background:T.bg3, borderRadius:16,
+            border:"1px solid rgba(239,68,68,0.4)",
+            width:"100%", maxWidth:420, padding:28, boxShadow:T.shadow }}>
+            <div style={{ fontSize:36, textAlign:"center" as const, marginBottom:12 }}>⚠️</div>
+            <div style={{ fontSize:16, fontWeight:700, color:"#f87171",
+              textAlign:"center" as const, marginBottom:8 }}>
+              ¿Borrar todas las reservas extraordinarias?
+            </div>
+            <div style={{ fontSize:13, color:T.muted, textAlign:"center" as const,
+              marginBottom:24, lineHeight:1.6 }}>
+              Esta acción eliminará <b style={{color:T.text}}>permanentemente</b> todos
+              los registros de tipo extraordinaria y bloqueo. No se puede deshacer.
+            </div>
+            <div style={{ display:"flex", gap:10 }}>
+              <button onClick={() => setConfirmDelete(false)}
+                style={{ ...S.btn("transparent"), flex:1,
+                  border:`1px solid ${T.border2}`, color:T.mutedL }}>
+                Cancelar
+              </button>
+              <button onClick={handleDeleteAll} disabled={deleting}
+                style={{ ...S.btn("linear-gradient(135deg,#dc2626,#ef4444)"),
+                  flex:1, opacity:deleting ? 0.7 : 1 }}>
+                {deleting ? "Borrando…" : "🗑️ Sí, borrar todo"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

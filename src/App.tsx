@@ -808,9 +808,10 @@ export default function App(){
                 onCellClick={r => {
                   if(r.tipo_reserva==="extraordinaria"||r.tipo_reserva==="bloqueo"){
                     const roomExtras = reservations.filter(x=>
-                      x.room===r.room && x.day===r.day &&
-                      (x.tipo_reserva==="extraordinaria"||x.tipo_reserva==="bloqueo")
-                    ).sort((a:any,b:any)=>a.specific_date>b.specific_date?1:-1);
+  x.room===r.room && x.day===r.day &&
+  (x.tipo_reserva==="extraordinaria"||x.tipo_reserva==="bloqueo") &&
+  (!x.specific_date || x.specific_date >= todayStr())
+).sort((a:any,b:any)=>a.specific_date>b.specific_date?1:-1);
                     setExtraModal({room:r.room, reservations:roomExtras});
                   }
                 }}
@@ -975,9 +976,10 @@ export default function App(){
                                     title={tooltipText}
                                     onClick={()=>{
                                       const roomExtras=reservations.filter(r=>
-                                        r.room===room&&r.day===selDay&&
-                                        (r.tipo_reserva==="extraordinaria"||r.tipo_reserva==="bloqueo")
-                                      ).sort((a,b)=>a.specific_date>b.specific_date?1:-1);
+  r.room===room&&r.day===selDay&&
+  (r.tipo_reserva==="extraordinaria"||r.tipo_reserva==="bloqueo") &&
+  (!r.specific_date || r.specific_date >= todayStr())
+).sort((a,b)=>a.specific_date>b.specific_date?1:-1);
                                       setExtraModal({room,reservations:roomExtras});
                                     }}
                                     style={{height:"100%",borderRadius:5,padding:"3px 6px",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",background:"rgba(147,51,234,0.22)",borderLeft:"3px solid #9333ea",border:"1px dashed #9333ea",cursor:"pointer",gap:2,transition:"background .15s"}}
@@ -994,9 +996,10 @@ export default function App(){
                                     onClick={()=>{
                                       if(isExtra&&isFirst){
                                         const roomExtras=reservations.filter(r=>
-                                          r.room===res.room&&r.day===selDay&&
-                                          (r.tipo_reserva==="extraordinaria"||r.tipo_reserva==="bloqueo")
-                                        ).sort((a,b)=>a.specific_date>b.specific_date?1:-1);
+  r.room===res.room&&r.day===selDay&&
+  (r.tipo_reserva==="extraordinaria"||r.tipo_reserva==="bloqueo") &&
+  (!r.specific_date || r.specific_date >= todayStr())
+).sort((a,b)=>a.specific_date>b.specific_date?1:-1);
                                         setExtraModal({room:res.room,reservations:roomExtras});
                                       }
                                     }}
