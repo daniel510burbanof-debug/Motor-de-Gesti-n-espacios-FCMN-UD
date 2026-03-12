@@ -68,9 +68,7 @@ interface Assignment {
   room: string; tipo_espacio: "teoria"|"lab"; displayLabel: string; score: number;
 }
 interface Conflict { request: ClassRequest; reason: string; type: "hard"|"soft"; }
-interface RoomEntry {
-  name: string; capacity: number; espacio: "teoria"|"lab"; subtipo: string;
-}
+interface RoomEntry { name: string; capacity: number; espacio: "teoria"|"lab"; subtipo: string; }
 
 // ── UTILIDADES ────────────────────────────────────────────────────────────────
 function normalizarPrograma(p: string): string {
@@ -138,31 +136,24 @@ function splitLabRequests(requests: ClassRequest[], maxLabCap: number = CAPACIDA
   return result;
 }
 
-// ── CONSTRUIR POOLS DESDE LA BD (fuente de verdad) ───────────────────────────
+// ── POOLS DESDE LA BD ─────────────────────────────────────────────────────────
 function buildRoomPools(externalSpaces?: any[]): { teoriaPool: RoomEntry[]; labPool: RoomEntry[] } {
   if (externalSpaces && externalSpaces.length > 0) {
     const activeSpaces = externalSpaces.filter((s: any) => s.activo);
     const allHardcoded = [...TEORIA_ROOMS, ...LAB_ROOMS];
     const teoriaPool: RoomEntry[] = [];
     const labPool:    RoomEntry[] = [];
-
     for (const s of activeSpaces) {
       const hardcoded = allHardcoded.find(r => r.name === s.nombre);
       const isLab     = s.tipo === "Laboratorio" || (hardcoded?.espacio === "lab");
       const subtipo   = s.tipo || hardcoded?.subtipo || "Aula";
-      const entry: RoomEntry = {
-        name: s.nombre, capacity: s.capacidad,
-        espacio: isLab ? "lab" : "teoria", subtipo,
-      };
-      if (isLab) labPool.push(entry);
-      else       teoriaPool.push(entry);
+      const entry: RoomEntry = { name: s.nombre, capacity: s.capacidad, espacio: isLab ? "lab" : "teoria", subtipo };
+      if (isLab) labPool.push(entry); else teoriaPool.push(entry);
     }
-
-    const finalTeoria = teoriaPool.length > 0
-      ? teoriaPool
-      : TEORIA_ROOMS.map(r => ({ ...r }));
-
-    return { teoriaPool: finalTeoria, labPool };
+    return {
+      teoriaPool: teoriaPool.length > 0 ? teoriaPool : TEORIA_ROOMS.map(r => ({ ...r })),
+      labPool,
+    };
   }
   return {
     teoriaPool: TEORIA_ROOMS.map(r => ({ ...r })),
@@ -170,7 +161,7 @@ function buildRoomPools(externalSpaces?: any[]): { teoriaPool: RoomEntry[]; labP
   };
 }
 
-// ── MOTOR DE ASIGNACIÓN ───────────────────────────────────────────────────────
+// ── MOTOR v5 ──────────────────────────────────────────────────────────────────
 function runScheduler(
   rawRequests: ClassRequest[], programConfig: ProgramConfig[],
   labAvailability: LabAvailability[], externalSpaces?: any[],
@@ -179,23 +170,20 @@ function runScheduler(
   const conflicts:   Conflict[]   = [];
 
   const { teoriaPool, labPool } = buildRoomPools(externalSpaces);
-  const maxLabCap = labPool.length > 0
-    ? Math.min(...labPool.map(r => r.capacity))
-    : CAPACIDAD_MAX_LAB;
-  const requests = splitLabRequests(rawRequests, maxLabCap);
+  const maxLabCap = labPool.length > 0 ? Math.min(...labPool.map(r => r.capacity)) : CAPACIDAD_MAX_LAB;
+  const requests  = splitLabRequests(rawRequests, maxLabCap);
 
-  // ── ESTRUCTURAS DE OCUPACIÓN ──────────────────────────────────────────────
   type SlotMap = Record<string, Record<string, Record<string, boolean>>>;
-  const roomOccupied:    SlotMap = {};
-  const teacherOccupied: SlotMap = {};
-  const cohortOccupied:  SlotMap = {};
-  const teacherBreak:    SlotMap = {};
-  const cohortDayHours:  Record<string, Record<string, number[]>> = {};
-  const programDaySemesters: Record<string, Set<number>> = {};
-  const parentAssignedSlots: Record<string, Array<{day:string; hours:string[]}>> = {};
+  const roomOccupied:         SlotMap = {};
+  const teacherOccupied:      SlotMap = {};
+  const cohortOccupied:       SlotMap = {};
+  const teacherBreak:         SlotMap = {};
+  const cohortDayHours:       Record<string, Record<string, number[]>> = {};
+  const programDaySemesters:  Record<string, Set<number>> = {};
+  const parentAssignedSlots:  Record<string, Array<{day:string; hours:string[]}>> = {};
   const parentRoomPreference: Record<string, string> = {};
-  const teoriaSlots: Record<string, Array<{day:string; hours:string[]}>> = {};
-  const roomUsageCount: Record<string, number> = {};
+  const teoriaSlots:          Record<string, Array<{day:string; hours:string[]}>> = {};
+  const roomUsageCount:       Record<string, number> = {};
 
   DAYS.forEach(d => {
     roomOccupied[d] = {}; teacherOccupied[d] = {};
@@ -207,102 +195,70 @@ function runScheduler(
   });
   [...teoriaPool, ...labPool].forEach(r => { roomUsageCount[r.name] = 0; });
 
-  // ── MEJORA 1: PRIORIZACIÓN EQUILIBRADA ───────────────────────────────────
-  // Ya no hay +1000 para labs. La dificultad se basa en escasez real:
-  // bloque largo + pocos días disponibles + espacio fijo = más difícil.
-  // Labs siguen teniendo una ventaja pequeña (+50) porque sus espacios
-  // son más escasos que las aulas de teoría.
+  // MEJORA 1: dificultad equilibrada, sin +1000 absoluto para labs
   const difficultyScore = (r: ClassRequest): number => {
     let score = 0;
-    // Bloque largo es más difícil de encajar (peso principal)
     score += r.hoursBlock * 150;
-    // Días restringidos = más difícil
     if (r.diasDisponibles && r.diasDisponibles.length > 0)
       score += (6 - r.diasDisponibles.length) * 80;
-    // Espacio fijo = muy difícil
     if (r.espacioEspecifico) score += 300;
-    // Labs tienen pool más pequeño → ligera ventaja, no absoluta
     if (r.type === "Laboratorio") score += 50;
-    // Más estudiantes = más difícil (para labs, el split ya lo maneja)
     score += r.students;
     return score;
   };
 
-  // ── MEJORA 3: INTERCALADO POR COHORTE ────────────────────────────────────
-  // En lugar de todos los labs primero, agrupamos por cohorte y dentro
-  // de cada cohorte ordenamos por dificultad. Así teoría y lab de la
-  // misma cohorte compiten simultáneamente por los espacios.
+  // MEJORA 3: intercalado por cohorte
   const cohortOrder = new Map<string, number>();
   let cohortIdx = 0;
-  // Primero recorrer en orden natural para asignar índice por primera aparición
   for (const r of requests) {
     const key = `${r.program}__${r.cohort}`;
     if (!cohortOrder.has(key)) cohortOrder.set(key, cohortIdx++);
   }
-
   const sorted = [...requests].sort((a, b) => {
     const ckA = `${a.program}__${a.cohort}`;
     const ckB = `${b.program}__${b.cohort}`;
-    // Primero agrupar por cohorte (orden de aparición en el Excel)
     const cohortDiff = (cohortOrder.get(ckA) ?? 0) - (cohortOrder.get(ckB) ?? 0);
     if (cohortDiff !== 0) return cohortDiff;
-    // Dentro de la misma cohorte: más difícil primero
     return difficultyScore(b) - difficultyScore(a);
   });
 
-  // ── SCORE SOFT ────────────────────────────────────────────────────────────
+  // MEJORA 2: softScore recibe sedeViolation como parámetro
   const softScore = (
     req: ClassRequest, day: string,
     block: string[], room: RoomEntry,
-    sedeViolation: boolean,   // ← nuevo parámetro
+    sedeViolation: boolean,
   ): number => {
     let score = 0;
-
-    // Penalizar fuertemente mezclar lab y teoría el mismo día
-    // (soft constraint — permite el slot pero lo hace poco atractivo)
     if (sedeViolation) score -= 40;
-
     const pdKey = `${req.program}|${day}`;
     const semsEnDia = programDaySemesters[pdKey] || new Set<number>();
     if (semsEnDia.has(req.cohortNumber - 1) || semsEnDia.has(req.cohortNumber + 1))
       score -= 10; else score += 5;
-
     if (req.hoursBlock % 2 !== 0) {
-      const yaUsado = assignments.some(
-        a => a.room === room.name && a.day === day && a.request.type === req.type
-      );
+      const yaUsado = assignments.some(a => a.room === room.name && a.day === day && a.request.type === req.type);
       if (yaUsado) score += 8;
     }
-
     if (block[0] < "12:00") score += 3;
     if (room.capacity - req.students > 30) score -= 2;
-
-    const usage = roomUsageCount[room.name] || 0;
-    score -= usage * 3;
-
+    score -= (roomUsageCount[room.name] || 0) * 3;
     if (req.parentId) {
       const pref = parentRoomPreference[req.parentId];
       if (pref && pref !== room.name) score -= 5;
     }
-
     return score;
   };
 
-  // ── BÚSQUEDA DE CANDIDATOS ────────────────────────────────────────────────
-  // MEJORA 2: sede ya NO es un continue duro — es una penalización de score.
-  // El parámetro respectarSede ahora solo controla si aplicamos la penalización
-  // estrictamente (bloqueo) o como soft constraint.
+  // sedeModo: "hard"=bloqueo | "soft"=penalización | "off"=ignorar
   const findCandidates = (
-    req: ClassRequest,
-    pool: RoomEntry[],
+    req: ClassRequest, pool: RoomEntry[],
     respectarGap: boolean,
-    sedeModo: "hard"|"soft"|"off",  // hard=bloqueo, soft=penalización, off=ignorar
+    sedeModo: "hard"|"soft"|"off",
     includeSabado: boolean,
   ) => {
-    const cohortKey     = `${req.program}__${req.cohort}`;
-    const teoriaKey     = `${cohortKey}__${req.subject}`;
-    const parentSlots   = req.parentId ? (parentAssignedSlots[req.parentId] || []) : [];
-    const teoriaOcup    = teoriaSlots[teoriaKey] || [];
+    const cohortKey   = `${req.program}__${req.cohort}`;
+    const teoriaKey   = `${cohortKey}__${req.subject}`;
+    const parentSlots = req.parentId ? (parentAssignedSlots[req.parentId] || []) : [];
+    const teoriaOcup  = teoriaSlots[teoriaKey] || [];
     const preferredRoom = req.parentId ? parentRoomPreference[req.parentId] : undefined;
 
     const sortedPool = [...pool].sort((a, b) => {
@@ -320,28 +276,13 @@ function runScheduler(
       diasBase = includeSabado ? DAYS : DAYS_SIN_SABADO;
     }
 
-    const candidates: Array<{
-      day: string; hour: string; block: string[];
-      room: RoomEntry; score: number;
-    }> = [];
+    const candidates: Array<{ day:string; hour:string; block:string[]; room:RoomEntry; score:number }> = [];
 
     for (const day of diasBase) {
-
-      // ── MEJORA 2: SEDE COMO SOFT CONSTRAINT ─────────────────────────────
-      const existeLab    = assignments.some(a =>
-        a.day === day && a.tipo_espacio === "lab" &&
-        `${a.request.program}__${a.request.cohort}` === cohortKey
-      );
-      const existeTeoria = assignments.some(a =>
-        a.day === day && a.tipo_espacio === "teoria" &&
-        `${a.request.program}__${a.request.cohort}` === cohortKey
-      );
-      const sedeConflicto =
-        (req.type === "Laboratorio" && existeTeoria) ||
-        (req.type === "Teoría"      && existeLab);
-
+      const existeLab    = assignments.some(a => a.day === day && a.tipo_espacio === "lab"    && `${a.request.program}__${a.request.cohort}` === cohortKey);
+      const existeTeoria = assignments.some(a => a.day === day && a.tipo_espacio === "teoria" && `${a.request.program}__${a.request.cohort}` === cohortKey);
+      const sedeConflicto = (req.type === "Laboratorio" && existeTeoria) || (req.type === "Teoría" && existeLab);
       if (sedeModo === "hard" && sedeConflicto) continue;
-      // En modo "soft" y "off" dejamos pasar — el score lo penaliza
 
       for (let hi = 0; hi <= HOURS.length - req.hoursBlock; hi++) {
         const start = HOURS[hi];
@@ -351,25 +292,18 @@ function runScheduler(
         if (req.horaDesde && req.horaHasta) {
           if (start < req.horaDesde || block[block.length - 1] > req.horaHasta) continue;
         }
-
         if (block.some(h => teacherBreak[day][h]?.[req.teacher]))    continue;
         if (block.some(h => teacherOccupied[day][h]?.[req.teacher])) continue;
         if (block.some(h => cohortOccupied[day][h]?.[cohortKey]))    continue;
 
         if (req.parentId) {
-          const choca = parentSlots.some(
-            ps => ps.day === day && ps.hours.some(h => block.includes(h))
-          );
+          const choca = parentSlots.some(ps => ps.day === day && ps.hours.some(h => block.includes(h)));
           if (choca) continue;
         }
-
         if (req.type === "Laboratorio") {
-          const cruza = teoriaOcup.some(
-            ts => ts.day === day && ts.hours.some(h => block.includes(h))
-          );
+          const cruza = teoriaOcup.some(ts => ts.day === day && ts.hours.some(h => block.includes(h)));
           if (cruza) continue;
         }
-
         if (respectarGap) {
           const cfg    = programConfig.find(p => p.program === req.program);
           const maxGap = cfg?.maxGapHours ?? 999;
@@ -389,11 +323,9 @@ function runScheduler(
 
         for (const room of sortedPool) {
           if (block.some(h => roomOccupied[day][h]?.[room.name])) continue;
-
           if (!req.espacioEspecifico && req.type !== "Laboratorio") {
             if (room.subtipo !== req.tipoEspacio) continue;
           }
-
           if (externalSpaces) {
             const ext = externalSpaces.find((s: any) => s.nombre === room.name);
             if (ext) {
@@ -402,41 +334,30 @@ function runScheduler(
               if (block.some(h => h < apertura || h >= cierre)) continue;
             }
           }
-
           if (req.type === "Laboratorio" && labAvailability.length > 0) {
             const progTieneVentanas = labAvailability.some(la => la.program === req.program);
             if (progTieneVentanas) {
-              const ventanas = labAvailability.filter(
-                la => la.lab === room.name && la.program === req.program && la.day === day
-              );
+              const ventanas = labAvailability.filter(la => la.lab === room.name && la.program === req.program && la.day === day);
               if (ventanas.length === 0) continue;
               const dentro = ventanas.some(v => block.every(h => h >= v.from && h < v.to));
               if (!dentro) continue;
             }
           }
-
-          // Pasar sedeConflicto al score para que penalice slots "sucios"
           const sedeViolation = sedeModo === "soft" && sedeConflicto;
-          candidates.push({
-            day, hour: start, block, room,
-            score: softScore(req, day, block, room, sedeViolation),
-          });
+          candidates.push({ day, hour: start, block, room, score: softScore(req, day, block, room, sedeViolation) });
         }
-
         if (req.type === "Teoría"      && candidates.length >= 30)  break;
         if (req.type === "Laboratorio" && candidates.length >= 100) break;
       }
       if (req.type === "Teoría"      && candidates.length >= 30)  break;
       if (req.type === "Laboratorio" && candidates.length >= 100) break;
     }
-
     return candidates;
   };
 
-  // ── CONFIRMAR ASIGNACIÓN ──────────────────────────────────────────────────
   const confirmarAsignacion = (
     req: ClassRequest,
-    best: { day: string; hour: string; block: string[]; room: RoomEntry; score: number },
+    best: { day:string; hour:string; block:string[]; room:RoomEntry; score:number },
   ) => {
     const cohortKey = `${req.program}__${req.cohort}`;
     const teoriaKey = `${cohortKey}__${req.subject}`;
@@ -447,7 +368,6 @@ function runScheduler(
       teacherOccupied[day][h][req.teacher] = true;
       cohortOccupied[day][h][cohortKey]    = true;
     });
-
     if (!cohortDayHours[cohortKey])      cohortDayHours[cohortKey] = {};
     if (!cohortDayHours[cohortKey][day]) cohortDayHours[cohortKey][day] = [];
     block.forEach(h => cohortDayHours[cohortKey][day].push(getHourIndex(h)));
@@ -460,18 +380,15 @@ function runScheduler(
       if (!teoriaSlots[teoriaKey]) teoriaSlots[teoriaKey] = [];
       teoriaSlots[teoriaKey].push({ day, hours: block });
     }
-
     if (req.parentId) {
       if (!parentAssignedSlots[req.parentId]) parentAssignedSlots[req.parentId] = [];
       parentAssignedSlots[req.parentId].push({ day, hours: block });
       if (!parentRoomPreference[req.parentId]) parentRoomPreference[req.parentId] = room.name;
     }
-
     if (req.hoursBlock >= 4) {
       const bi = getHourIndex(start) + req.hoursBlock;
       if (bi < HOURS.length) teacherBreak[day][HOURS[bi]][req.teacher] = true;
     }
-
     roomUsageCount[room.name] = (roomUsageCount[room.name] || 0) + 1;
 
     const subgroupLabel = req.subgroup ? ` · ${req.subgroup}` : "";
@@ -485,9 +402,7 @@ function runScheduler(
     });
   };
 
-  // ── LOOP PRINCIPAL ────────────────────────────────────────────────────────
   for (const req of sorted) {
-
     let basePool: RoomEntry[] = [];
     if (req.type === "Laboratorio") {
       basePool = labPool;
@@ -505,48 +420,27 @@ function runScheduler(
 
     if (req.espacioEspecifico) {
       const allRooms = [...teoriaPool, ...labPool];
-      const forced = allRooms.find(r => r.name === req.espacioEspecifico);
+      const forced   = allRooms.find(r => r.name === req.espacioEspecifico);
       if (forced) {
         pool = [forced];
       } else {
-        conflicts.push({
-          request: req,
-          reason: `Espacio específico "${req.espacioEspecifico}" no encontrado.`,
-          type: "hard",
-        });
+        conflicts.push({ request: req, reason: `Espacio específico "${req.espacioEspecifico}" no encontrado.`, type: "hard" });
         continue;
       }
     }
 
     if (pool.length === 0) {
-      conflicts.push({
-        request: req,
-        reason: `Sin espacio tipo "${req.tipoEspacio}" con capacidad ≥ ${req.students}.`,
-        type: "hard",
-      });
+      conflicts.push({ request: req, reason: `Sin espacio tipo "${req.tipoEspacio}" con capacidad ≥ ${req.students}.`, type: "hard" });
       continue;
     }
 
-    // ── CASCADA DE INTENTOS ───────────────────────────────────────────────
-    // Intento 1: todas las restricciones, sede como bloqueo duro
-    let candidates = findCandidates(req, pool, true,  "hard", false);
-    // Intento 2: relajar gap, sede sigue bloqueando
-    if (!candidates.length)
-      candidates   = findCandidates(req, pool, false, "hard", false);
-    // Intento 3: con gap, sede como penalización (soft)
-    if (!candidates.length)
-      candidates   = findCandidates(req, pool, true,  "soft", false);
-    // Intento 4: sin gap, sede como penalización (soft)
-    if (!candidates.length)
-      candidates   = findCandidates(req, pool, false, "soft", false);
-    // Intento 5: incluir sábado, sede soft
-    if (!candidates.length)
-      candidates   = findCandidates(req, pool, false, "soft", true);
-    // ── MEJORA 4: BACKTRACKING DE RESCATE ────────────────────────────────
-    // Último recurso: ignorar sede y gap completamente.
-    // La clase existe aunque viole la preferencia de días exclusivos.
-    if (!candidates.length)
-      candidates   = findCandidates(req, pool, false, "off",  true);
+    // Cascada de 6 intentos: de más restrictivo a rescate total
+    let candidates = findCandidates(req, pool, true,  "hard", false); // 1: gap + sede hard
+    if (!candidates.length) candidates = findCandidates(req, pool, false, "hard", false); // 2: sin gap, sede hard
+    if (!candidates.length) candidates = findCandidates(req, pool, true,  "soft", false); // 3: gap, sede soft
+    if (!candidates.length) candidates = findCandidates(req, pool, false, "soft", false); // 4: sin gap, sede soft
+    if (!candidates.length) candidates = findCandidates(req, pool, false, "soft", true);  // 5: +sábado, sede soft
+    if (!candidates.length) candidates = findCandidates(req, pool, false, "off",  true);  // 6: rescate total
 
     if (candidates.length > 0) {
       candidates.sort((a, b) => b.score - a.score);
@@ -566,12 +460,12 @@ function runScheduler(
 // ── PARSER EXCEL ──────────────────────────────────────────────────────────────
 function parseExcel(buffer: ArrayBuffer): {requests:ClassRequest[];labAvailability:LabAvailability[];error?:string} {
   try {
-    const wb = XLSX.read(new Uint8Array(buffer), {type:"array"});
-    const ws = wb.Sheets[wb.SheetNames[0]];
+    const wb   = XLSX.read(new Uint8Array(buffer), {type:"array"});
+    const ws   = wb.Sheets[wb.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json(ws) as any[];
     if (!rows.length) return {requests:[],labAvailability:[],error:"El archivo está vacío."};
 
-    const requests: ClassRequest[] = rows.map((row,i)=>{
+    const requests: ClassRequest[] = rows.map((row,i) => {
       const prog  = normalizarPrograma(String(row["Programa"]||""));
       const coh   = String(row["Semestre_Cohorte"]||"").trim();
       const subj  = String(row["Asignatura"]||"").trim();
@@ -586,21 +480,21 @@ function parseExcel(buffer: ArrayBuffer): {requests:ClassRequest[];labAvailabili
 
       if (!prog||!subj||!tchr) throw new Error(`Fila ${i+2}: faltan Programa, Asignatura o Docente.`);
 
-      const type: "Teoría"|"Laboratorio" = rawT.toLowerCase().includes("lab")?"Laboratorio":"Teoría";
-      const tipoEspacio = type==="Laboratorio"?"Laboratorio" as const:normalizarTipoEspacio(rawTE);
+      const type: "Teoría"|"Laboratorio" = rawT.toLowerCase().includes("lab") ? "Laboratorio" : "Teoría";
+      const tipoEspacio = type === "Laboratorio" ? "Laboratorio" as const : normalizarTipoEspacio(rawTE);
       const diasDisponibles = parsearDias(diasR);
       const horasP = parsearHoras(horaR);
 
       return {
         id:`req-${i}`, program:prog, cohort:coh,
-        cohortNumber:extraerNumeroSemestre(coh),
+        cohortNumber: extraerNumeroSemestre(coh),
         subject:subj, type, tipoEspacio, teacher:tchr,
-        hoursBlock:isNaN(hrs)?2:Math.min(Math.max(hrs,1),4),
-        students:isNaN(stu)?30:stu,
-        diasDisponibles:diasDisponibles.length>0?diasDisponibles:undefined,
-        horaDesde:horasP?.desde,
-        horaHasta:horasP?.hasta,
-        espacioEspecifico:espE||undefined,
+        hoursBlock: isNaN(hrs) ? 2 : Math.min(Math.max(hrs,1),4),
+        students: isNaN(stu) ? 30 : stu,
+        diasDisponibles: diasDisponibles.length > 0 ? diasDisponibles : undefined,
+        horaDesde: horasP?.desde,
+        horaHasta: horasP?.hasta,
+        espacioEspecifico: espE || undefined,
       };
     });
 
@@ -608,13 +502,13 @@ function parseExcel(buffer: ArrayBuffer): {requests:ClassRequest[];labAvailabili
     const labSheet = wb.Sheets["Disponibilidad_Labs"];
     if (labSheet) {
       const labRows = XLSX.utils.sheet_to_json(labSheet) as any[];
-      labAvailability = labRows.map(r=>({
+      labAvailability = labRows.map(r => ({
         lab:     String(r["Lab"]||"").trim(),
         program: normalizarPrograma(String(r["Programa"]||"")),
         day:     String(r["Dia"]||"").trim(),
         from:    normalizarHora(r["Desde"]??"06:00"),
         to:      normalizarHora(r["Hasta"]??"19:00"),
-      })).filter(r=>r.lab&&r.program&&r.day);
+      })).filter(r => r.lab && r.program && r.day);
     }
     return {requests, labAvailability};
   } catch(err:any) {
@@ -661,7 +555,7 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
     btn:(bg:string,extra?:any)=>({padding:"10px 20px",borderRadius:8,border:"none",color:"#fff",background:bg,fontSize:13,fontWeight:600 as const,cursor:"pointer",...extra}),
   };
 
-  const processFile = useCallback((file:File)=>{
+  const processFile = useCallback((file:File) => {
     setError("");
     const reader = new FileReader();
     reader.onload = e => {
@@ -672,22 +566,23 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
     reader.readAsArrayBuffer(file);
   },[]);
 
-  const handleDrop  = (e:React.DragEvent)=>{e.preventDefault();setDragOver(false);const f=e.dataTransfer.files[0];if(f)processFile(f);};
-  const handleFile  = (e:React.ChangeEvent<HTMLInputElement>)=>{const f=e.target.files?.[0];if(f)processFile(f);};
-  const generateSchedule = ()=>{
-    const result=runScheduler(requests,programConfig,labAvail,externalSpaces);
+  const handleDrop = (e:React.DragEvent) => { e.preventDefault(); setDragOver(false); const f=e.dataTransfer.files[0]; if(f) processFile(f); };
+  const handleFile = (e:React.ChangeEvent<HTMLInputElement>) => { const f=e.target.files?.[0]; if(f) processFile(f); };
+
+  const generateSchedule = () => {
+    const result = runScheduler(requests, programConfig, labAvail, externalSpaces);
     setAssignments(result.assignments); setConflicts(result.conflicts); setStep("preview");
   };
 
-  const handleSave=async()=>{
-    if(!session)return; setSaving(true); let count=0;
+  const handleSave = async () => {
+    if(!session) return; setSaving(true); let count=0;
     try {
-      for(let i=0;i<assignments.length;i+=10){
-        const batch=assignments.slice(i,i+10).map(a=>({
+      for(let i=0; i<assignments.length; i+=10) {
+        const batch = assignments.slice(i,i+10).map(a=>({
           program:a.request.program, subject:a.displayLabel, teacher:a.request.teacher,
           day:a.day, hour:a.hour, hour_end:a.hour_end, room:a.room, tipo_espacio:a.tipo_espacio,
         }));
-        const res=await fetch(`${SUPABASE_URL}/rest/v1/reservations`,{
+        const res = await fetch(`${SUPABASE_URL}/rest/v1/reservations`,{
           method:"POST",
           headers:{apikey:SUPABASE_KEY,Authorization:`Bearer ${session.access_token}`,"Content-Type":"application/json",Prefer:"return=minimal"},
           body:JSON.stringify(batch),
@@ -698,22 +593,20 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
     } catch { setError("Error al guardar."); } finally { setSaving(false); }
   };
 
-  const filtered      = assignments.filter(a=>filterView==="all"?true:filterView==="teoria"?a.tipo_espacio==="teoria":a.tipo_espacio==="lab");
-  const teoriaCount   = assignments.filter(a=>a.tipo_espacio==="teoria").length;
-  const labCount      = assignments.filter(a=>a.tipo_espacio==="lab").length;
-  const splitCount    = assignments.filter(a=>a.request.parentId).length;
-  const overrideCount = assignments.filter(a=>a.request.espacioEspecifico).length;
-  const hardConflicts = conflicts.filter(c=>c.type==="hard");
-  const sabadoCount   = assignments.filter(a=>a.day==="Sábado").length;
-  const sedeSoftCount = assignments.filter(a=>a.score<=-35).length;
-
+  const filtered      = assignments.filter(a => filterView==="all" ? true : filterView==="teoria" ? a.tipo_espacio==="teoria" : a.tipo_espacio==="lab");
+  const teoriaCount   = assignments.filter(a => a.tipo_espacio==="teoria").length;
+  const labCount      = assignments.filter(a => a.tipo_espacio==="lab").length;
+  const splitCount    = assignments.filter(a => a.request.parentId).length;
+  const overrideCount = assignments.filter(a => a.request.espacioEspecifico).length;
+  const hardConflicts = conflicts.filter(c => c.type==="hard");
+  const sabadoCount   = assignments.filter(a => a.day==="Sábado").length;
+  const sedeSoftCount = assignments.filter(a => a.score <= -35).length;
   const { teoriaPool, labPool } = buildRoomPools(externalSpaces);
 
   return (
     <div style={Sty.overlay} onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
       <div style={Sty.box}>
 
-        {/* HEADER */}
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"18px 24px",borderBottom:`1px solid ${T.border}`}}>
           <div>
             <div style={{fontSize:16,fontWeight:700,color:T.text,fontFamily:"Montserrat,sans-serif"}}>🤖 AutoScheduler — Motor v5</div>
@@ -725,7 +618,6 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
           <button onClick={onClose} style={{background:"transparent",border:"none",color:T.muted,fontSize:22,cursor:"pointer"}}>✕</button>
         </div>
 
-        {/* STEPS */}
         <div style={{display:"flex",borderBottom:`1px solid ${T.border}`}}>
           {[{key:"upload",label:"1. Subir Excel"},{key:"config",label:"2. Configurar"},{key:"preview",label:"3. Vista Previa"},{key:"done",label:"4. Guardado"}].map(s=>(
             <div key={s.key} style={{flex:1,padding:"10px",textAlign:"center" as const,fontSize:12,fontWeight:600,
@@ -739,7 +631,6 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
 
         <div style={{padding:24}}>
 
-          {/* ══ STEP 1: UPLOAD ══ */}
           {step==="upload"&&(
             <div style={{display:"flex",flexDirection:"column",gap:20}}>
               <div
@@ -758,9 +649,7 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
                 </div>
                 <input id="xl-input-v2" type="file" accept=".xlsx,.xls" style={{display:"none"}} onChange={handleFile}/>
               </div>
-
               {error&&<div style={{background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.3)",color:"#f87171",padding:"12px 16px",borderRadius:8,fontSize:13}}>⚠ {error}</div>}
-
               <div style={{display:"grid",gridTemplateColumns:isMobile?"1fr":"1fr 1fr",gap:16}}>
                 <div style={{background:T.bg2,borderRadius:10,padding:16,border:`1px solid ${T.border}`}}>
                   <div style={{fontSize:12,fontWeight:700,color:T.mutedL,marginBottom:10,textTransform:"uppercase" as const}}>📋 Columnas obligatorias</div>
@@ -795,7 +684,6 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
             </div>
           )}
 
-          {/* ══ STEP 2: CONFIG ══ */}
           {step==="config"&&(
             <div style={{display:"flex",flexDirection:"column",gap:20}}>
               <div style={{background:T.bg2,borderRadius:10,padding:16,border:`1px solid rgba(0,102,204,0.3)`}}>
@@ -821,22 +709,14 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
                   ))}
                 </div>
               </div>
-
               <div style={{background:T.bg2,borderRadius:10,padding:16,border:`1px solid rgba(74,222,128,0.2)`}}>
-                <div style={{fontSize:13,fontWeight:700,color:T.text,marginBottom:10}}>🏛️ Espacios disponibles para este horario</div>
+                <div style={{fontSize:13,fontWeight:700,color:T.text,marginBottom:10}}>🏛️ Espacios disponibles</div>
                 <div style={{display:"flex",gap:8,flexWrap:"wrap" as const}}>
-                  <span style={{fontSize:12,padding:"4px 12px",borderRadius:99,background:"rgba(96,165,250,0.1)",color:"#60a5fa",border:"1px solid rgba(96,165,250,0.3)"}}>
-                    🏫 Teoría: {teoriaPool.length} aulas
-                  </span>
-                  <span style={{fontSize:12,padding:"4px 12px",borderRadius:99,background:"rgba(74,222,128,0.1)",color:"#4ade80",border:"1px solid rgba(74,222,128,0.3)"}}>
-                    🔬 Labs: {labPool.length} laboratorios
-                  </span>
-                  <span style={{fontSize:12,padding:"4px 12px",borderRadius:99,background:"rgba(251,146,60,0.1)",color:"#fb923c",border:"1px solid rgba(251,146,60,0.3)"}}>
-                    ✂️ Cap. max lab: {labPool.length>0?Math.min(...labPool.map(r=>r.capacity)):CAPACIDAD_MAX_LAB} est.
-                  </span>
+                  <span style={{fontSize:12,padding:"4px 12px",borderRadius:99,background:"rgba(96,165,250,0.1)",color:"#60a5fa",border:"1px solid rgba(96,165,250,0.3)"}}>🏫 Teoría: {teoriaPool.length} aulas</span>
+                  <span style={{fontSize:12,padding:"4px 12px",borderRadius:99,background:"rgba(74,222,128,0.1)",color:"#4ade80",border:"1px solid rgba(74,222,128,0.3)"}}>🔬 Labs: {labPool.length} laboratorios</span>
+                  <span style={{fontSize:12,padding:"4px 12px",borderRadius:99,background:"rgba(251,146,60,0.1)",color:"#fb923c",border:"1px solid rgba(251,146,60,0.3)"}}>✂️ Cap. max lab: {labPool.length>0?Math.min(...labPool.map(r=>r.capacity)):CAPACIDAD_MAX_LAB} est.</span>
                 </div>
               </div>
-
               <div style={{background:T.bg2,borderRadius:10,padding:16,border:`1px solid ${T.border}`}}>
                 <div style={{fontSize:13,fontWeight:700,color:T.text,marginBottom:10}}>
                   📋 Excel cargado: <span style={{color:"#60a5fa"}}>{requests.length} clases</span>
@@ -861,7 +741,6 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
                   )}
                 </div>
               </div>
-
               <div style={{display:"flex",gap:10}}>
                 <button onClick={()=>setStep("upload")} style={{...Sty.btn(T.bg),border:`1px solid ${T.border2}`,color:T.mutedL}}>← Volver</button>
                 <button onClick={generateSchedule} style={{...Sty.btn(`linear-gradient(135deg,${T.udBlue},${T.udAccent})`),flex:1}}>🚀 Generar Horario</button>
@@ -869,7 +748,6 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
             </div>
           )}
 
-          {/* ══ STEP 3: PREVIEW ══ */}
           {step==="preview"&&(
             <div style={{display:"flex",flexDirection:"column",gap:20}}>
               <div style={{display:"grid",gridTemplateColumns:isMobile?"repeat(2,1fr)":"repeat(4,1fr)",gap:12}}>
@@ -886,11 +764,10 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
                   </div>
                 ))}
               </div>
-
               {splitCount>0&&<div style={{background:"rgba(74,222,128,0.07)",border:"1px solid rgba(74,222,128,0.25)",borderRadius:10,padding:"12px 16px",fontSize:13,color:"#86efac"}}>✂️ <b style={{color:"#4ade80"}}>{splitCount} subgrupos</b> generados automáticamente.</div>}
               {overrideCount>0&&<div style={{background:"rgba(251,146,60,0.07)",border:"1px solid rgba(251,146,60,0.25)",borderRadius:10,padding:"12px 16px",fontSize:13,color:"#fed7aa"}}>📌 <b style={{color:"#fb923c"}}>{overrideCount} clases</b> asignadas a espacio específico.</div>}
               {sabadoCount>0&&<div style={{background:"rgba(148,163,184,0.07)",border:"1px solid rgba(148,163,184,0.25)",borderRadius:10,padding:"12px 16px",fontSize:13,color:"#cbd5e1"}}>📅 <b style={{color:"#94a3b8"}}>{sabadoCount} clases</b> asignadas en sábado (último recurso).</div>}
-              {sedeSoftCount>0&&<div style={{background:"rgba(251,191,36,0.07)",border:"1px solid rgba(251,191,36,0.25)",borderRadius:10,padding:"12px 16px",fontSize:13,color:"#fde68a"}}>⚠️ <b style={{color:"#fbbf24"}}>{sedeSoftCount} clases</b> comparten día entre lab y teoría (restricción de sede relajada).</div>}
+              {sedeSoftCount>0&&<div style={{background:"rgba(251,191,36,0.07)",border:"1px solid rgba(251,191,36,0.25)",borderRadius:10,padding:"12px 16px",fontSize:13,color:"#fde68a"}}>⚠️ <b style={{color:"#fbbf24"}}>{sedeSoftCount} clases</b> comparten día lab+teoría (sede relajada).</div>}
 
               <div style={{display:"flex",gap:8,alignItems:"center"}}>
                 <span style={{fontSize:12,color:T.muted,fontWeight:600}}>Ver:</span>
@@ -919,13 +796,13 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
                       </thead>
                       <tbody>
                         {filtered.map((a,i)=>{
-                          const color=PROG_COLORS[a.request.program]||"#94a3b8";
-                          const icon=PROG_ICONS[a.request.program]||"📚";
-                          const isLab=a.tipo_espacio==="lab";
-                          const isSplit=!!a.request.parentId;
-                          const isOverride=!!a.request.espacioEspecifico;
-                          const isSabado=a.day==="Sábado";
-                          const isSedeSoft=a.score<=-35;
+                          const color      = PROG_COLORS[a.request.program]||"#94a3b8";
+                          const icon       = PROG_ICONS[a.request.program]||"📚";
+                          const isLab      = a.tipo_espacio==="lab";
+                          const isSplit    = !!a.request.parentId;
+                          const isOverride = !!a.request.espacioEspecifico;
+                          const isSabado   = a.day==="Sábado";
+                          const isSedeSoft = a.score<=-35;
                           return(
                             <tr key={i} style={{background:i%2===0?T.bg2:T.bg,borderBottom:`1px solid ${T.border}30`}}>
                               <td style={{padding:"7px 10px"}}>
@@ -936,9 +813,7 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
                                 </span>
                               </td>
                               <td style={{padding:"7px 10px",fontSize:10,color:T.muted}}>{a.request.tipoEspacio}</td>
-                              <td style={{padding:"7px 10px",color}}>
-                                <span style={{display:"flex",alignItems:"center",gap:4}}><span>{icon}</span>{a.request.program}</span>
-                              </td>
+                              <td style={{padding:"7px 10px",color}}><span style={{display:"flex",alignItems:"center",gap:4}}><span>{icon}</span>{a.request.program}</span></td>
                               <td style={{padding:"7px 10px",color:T.text,maxWidth:130,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" as const}} title={a.request.subject}>{a.request.subject}</td>
                               <td style={{padding:"7px 10px"}}>
                                 {a.request.subgroup?(
@@ -1006,7 +881,6 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
             </div>
           )}
 
-          {/* ══ STEP 4: DONE ══ */}
           {step==="done"&&(
             <div style={{textAlign:"center" as const,padding:"40px 20px"}}>
               <div style={{fontSize:64,marginBottom:20}}>🎉</div>
