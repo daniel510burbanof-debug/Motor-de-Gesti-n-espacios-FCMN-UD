@@ -14,6 +14,8 @@ import TeacherView from "./TeacherView";
 import MobileGrid from "./MobileGrid";
 import { useBreakpoint } from "./useIsMobile";
 import type { Space } from "./SpacesManager";
+import UserManager from "./UserManager";
+import { usePermisos } from "./usePermisos";
 
 const SUPABASE_URL = "https://wlisbvcqqjlgzfvbnscp.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndsaXNidmNxcWpsZ3pmdmJuc2NwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI0Njg5MDIsImV4cCI6MjA4ODA0NDkwMn0.66Ly-QcVzj0rM5DyH6o3NDE-jfPSlPgRuJYyTDMlW4g";
@@ -40,10 +42,10 @@ const sbAuth = {
   },
   async signOut(token: string) { await authApi("/auth/v1/logout",{method:"POST"},token); },
   async getProfile(userId: string, token: string) {
-    const res = await authApi(`/rest/v1/profiles?id=eq.${userId}&select=id,email,role,program`,{},token);
+    const res = await authApi(`/rest/v1/profiles?id=eq.${userId}&select=id,email,role,program,nombre,permisos,espacios_permitidos,activo`,{},token);
     const data = await res.json();
     if (data[0]?.program !== undefined) return data[0];
-    const res2 = await authApi(`/rest/v1/profiles?select=id,email,role,program`,{},token);
+    const res2 = await authApi(`/rest/v1/profiles?select=id,email,role,program,nombre,permisos,espacios_permitidos,activo`,{},token);
     const data2 = await res2.json();
     return data2.find((p: any) => p.id === userId) || data[0] || null;
   },
@@ -103,7 +105,6 @@ const T_STATIC = {
   mutedLight:"#94a3b8",
 };
 
-// ← CAMBIO: helper para formato de rango
 function hourRangeLabel(h: string): string {
   const i = HOURS.indexOf(h);
   if (i === -1 || i >= HOURS.length - 1) return h;
@@ -113,13 +114,12 @@ function hourRangeLabel(h: string): string {
 function getHoursBetween(start:string,end:string):string[]{
   const si=HOURS.indexOf(start),ei=HOURS.indexOf(end);
   if(si===-1||ei===-1||ei<=si)return[start];
-  return HOURS.slice(si,ei); // ← solo los bloques reales: 06:00 y 07:00
+  return HOURS.slice(si,ei);
 }
 function getEndHourOptions(h:string):string[]{
   const i=HOURS.indexOf(h); return i===-1?[]:HOURS.slice(i);
 }
 
-// ← CAMBIO: fecha de hoy en YYYY-MM-DD
 function todayStr(): string {
   return new Date().toISOString().slice(0, 10);
 }
@@ -458,7 +458,6 @@ export default function App(){
     sCard:     {background:T.card,borderRadius:12,border:`1px solid ${T.border}`,padding:"16px 18px",display:"flex",alignItems:"center",gap:12,transition:"transform .2s,box-shadow .2s"},
     gridWrap:  {width:"100%",background:T.bg2,borderRadius:12,border:`1px solid ${T.border}`,overflow:"hidden"},
     th:        {color:T.muted,fontWeight:600,padding:"8px 6px",borderRight:`1px solid ${T.border}`,borderBottom:`1px solid ${T.border}`,textAlign:"center" as const,fontSize:10,minWidth:98,background:T.bg3},
-    // ← CAMBIO: hourTd más ancho para mostrar rango
     hourTd:    {position:"sticky" as const,left:0,zIndex:10,background:T.bg2,color:T.mutedL,fontFamily:"monospace",fontWeight:700,padding:"4px 6px",borderRight:`1px solid ${T.border}`,borderBottom:`1px solid ${T.border}`,textAlign:"center" as const,fontSize:10,width:80},
     cell:      {borderRight:`1px solid ${T.border}`,borderBottom:`1px solid ${T.border}`,padding:2,height:56,verticalAlign:"top" as const},
     overlay:   {position:"fixed" as const,inset:0,zIndex:100,display:"flex",alignItems:"center",justifyContent:"center",padding:16,background:"rgba(0,0,0,0.85)",backdropFilter:"blur(8px)"},
@@ -511,13 +510,16 @@ export default function App(){
   const [reservasExt,setReservasExt]=useState(false);
   const [spacesLoaded,setSpacesLoaded]=useState(false);
   const [teacherView, setTeacherView] = useState(false);
+  const [userManager, setUserManager] = useState(false);
 
   const role=profile?.role||"viewer";
   const isSuperAdmin=role==="superadmin";
   const isEditor=role==="editor";
-  const canCreate=isSuperAdmin||isEditor;
-  const canDelete=isSuperAdmin;
   const roleInfo=ROLE_CONFIG[role]||ROLE_CONFIG.viewer;
+
+  const { can, filtrarEspacios } = usePermisos(profile);
+  const canCreate = can("crear_reserva");
+  const canDelete  = can("eliminar_reserva");
 
   const showToast=(msg:string,type="ok")=>{
     setToast({msg,type});
@@ -585,11 +587,11 @@ export default function App(){
   },[reservations,searchQuery]);
 
   const resMap=useMemo(()=>{
-    const today = todayStr(); // ← CAMBIO
+    const today = todayStr();
     const m:Record<string,any>={};
     reservations
       .filter(r=>vistaEspacio==="lab"?r.tipo_espacio==="lab":r.tipo_espacio!=="lab")
-      .filter(r=>!r.specific_date || r.specific_date >= today) // ← CAMBIO: ocultar pasadas
+      .filter(r=>!r.specific_date || r.specific_date >= today)
       .forEach(r=>{
         getHoursBetween(r.hour,r.hour_end||r.hour).forEach(h=>{
           m[`${r.day}|${h}|${r.room}`]=r;
@@ -599,12 +601,12 @@ export default function App(){
   },[reservations,vistaEspacio]);
 
   const extraCountMap = useMemo(()=>{
-    const today = todayStr(); // ← CAMBIO
+    const today = todayStr();
     const m: Record<string,any[]> = {};
     reservations
       .filter(r=>(r.tipo_reserva==="extraordinaria"||r.tipo_reserva==="bloqueo")&&
         (vistaEspacio==="lab"?r.tipo_espacio==="lab":r.tipo_espacio!=="lab"))
-      .filter(r=>!r.specific_date || r.specific_date >= today) // ← CAMBIO: ocultar pasadas
+      .filter(r=>!r.specific_date || r.specific_date >= today)
       .forEach(r=>{
         getHoursBetween(r.hour,r.hour_end||r.hour).forEach(h=>{
           const key=`${r.day}|${h}|${r.room}`;
@@ -689,34 +691,46 @@ export default function App(){
           ＋ Nueva Reserva
         </button>
       )}
-      <button onClick={()=>setExportModal(true)}
-        style={{...S.outlineBtn,width:"100%",textAlign:"center" as const,padding:"12px"}}>
-        📊 Exportar Reporte
-      </button>
-      {isSuperAdmin&&(
-        <>
-          <button onClick={()=>setAutoScheduler(true)}
-            style={{...S.outlineBtn,width:"100%",textAlign:"center" as const,padding:"12px",borderColor:T.udAccent,color:"#60a5fa"}}>
-            🤖 Auto-Horario
-          </button>
-          <button onClick={()=>setSpacesModal(true)}
-            style={{...S.outlineBtn,width:"100%",textAlign:"center" as const,padding:"12px",borderColor:"#a78bfa",color:"#a78bfa"}}>
-            🏛️ Gestión de Espacios
-          </button>
-          <button onClick={()=>setReservasExt(true)}
-            style={{...S.outlineBtn,width:"100%",textAlign:"center" as const,padding:"12px",borderColor:"#4ade80",color:"#4ade80"}}>
-            ⭐ Reservas Extraordinarias
-          </button>
-          <button onClick={()=>setDashboard(true)}
-            style={{...S.outlineBtn,width:"100%",textAlign:"center" as const,padding:"12px",borderColor:"#f472b6",color:"#f472b6"}}>
-            📊 Dashboard
-          </button>
-        </>
+      {can("exportar")&&(
+        <button onClick={()=>setExportModal(true)}
+          style={{...S.outlineBtn,width:"100%",textAlign:"center" as const,padding:"12px"}}>
+          📊 Exportar Reporte
+        </button>
       )}
-      {(isSuperAdmin||isEditor)&&(
+      {can("auto_horario")&&(
+        <button onClick={()=>setAutoScheduler(true)}
+          style={{...S.outlineBtn,width:"100%",textAlign:"center" as const,padding:"12px",borderColor:T.udAccent,color:"#60a5fa"}}>
+          🤖 Auto-Horario
+        </button>
+      )}
+      {can("gestion_espacios")&&(
+        <button onClick={()=>setSpacesModal(true)}
+          style={{...S.outlineBtn,width:"100%",textAlign:"center" as const,padding:"12px",borderColor:"#a78bfa",color:"#a78bfa"}}>
+          🏛️ Gestión de Espacios
+        </button>
+      )}
+      {can("reservas_extraordinarias")&&(
+        <button onClick={()=>setReservasExt(true)}
+          style={{...S.outlineBtn,width:"100%",textAlign:"center" as const,padding:"12px",borderColor:"#4ade80",color:"#4ade80"}}>
+          ⭐ Reservas Extraordinarias
+        </button>
+      )}
+      {can("ver_dashboard")&&(
+        <button onClick={()=>setDashboard(true)}
+          style={{...S.outlineBtn,width:"100%",textAlign:"center" as const,padding:"12px",borderColor:"#f472b6",color:"#f472b6"}}>
+          📊 Dashboard
+        </button>
+      )}
+      {can("vista_docentes")&&(
         <button onClick={()=>setTeacherView(true)}
           style={{...S.outlineBtn,width:"100%",textAlign:"center" as const,padding:"12px",borderColor:"#60a5fa",color:"#60a5fa"}}>
           👤 Vista Docentes
+        </button>
+      )}
+      {isSuperAdmin&&(
+        <button onClick={()=>setUserManager(true)}
+          style={{...S.outlineBtn,width:"100%",textAlign:"center" as const,padding:"12px",borderColor:"#818cf8",color:"#818cf8"}}>
+          👥 Administrar Usuarios
         </button>
       )}
       <div style={{marginTop:8,padding:"12px 16px",background:T.bg2,borderRadius:10,border:`1px solid ${T.border}`}}>
@@ -778,12 +792,13 @@ export default function App(){
                 <div style={{fontSize:10,color:roleInfo.color}}>{roleInfo.label}{profile?.program?` · ${profile.program}`:""}</div>
               </div>
             </div>
-            <button style={S.outlineBtn} onClick={()=>setExportModal(true)} className="hide-mobile">📊 Exportar</button>
-            {isSuperAdmin&&<button style={{...S.outlineBtn,borderColor:T.udAccent,color:"#60a5fa"}} onClick={()=>setAutoScheduler(true)} className="hide-mobile">🤖 Auto-Horario</button>}
-            {isSuperAdmin&&<button style={{...S.outlineBtn,borderColor:"#a78bfa",color:"#a78bfa"}} onClick={()=>setSpacesModal(true)} className="hide-mobile">🏛️ Espacios</button>}
-            {isSuperAdmin&&<button style={{...S.outlineBtn,borderColor:"#4ade80",color:"#4ade80"}} onClick={()=>setReservasExt(true)} className="hide-mobile">⭐ Reservas</button>}
-            {isSuperAdmin&&<button style={{...S.outlineBtn,borderColor:"#f472b6",color:"#f472b6"}} onClick={()=>setDashboard(true)} className="hide-mobile">📊 Dashboard</button>}
-            {(isSuperAdmin||isEditor)&&<button style={{...S.outlineBtn,borderColor:"#60a5fa",color:"#60a5fa"}} onClick={()=>setTeacherView(true)} className="hide-mobile">👤 Docentes</button>}
+            {can("exportar")&&<button style={S.outlineBtn} onClick={()=>setExportModal(true)} className="hide-mobile">📊 Exportar</button>}
+            {can("auto_horario")&&<button style={{...S.outlineBtn,borderColor:T.udAccent,color:"#60a5fa"}} onClick={()=>setAutoScheduler(true)} className="hide-mobile">🤖 Auto-Horario</button>}
+            {can("gestion_espacios")&&<button style={{...S.outlineBtn,borderColor:"#a78bfa",color:"#a78bfa"}} onClick={()=>setSpacesModal(true)} className="hide-mobile">🏛️ Espacios</button>}
+            {can("reservas_extraordinarias")&&<button style={{...S.outlineBtn,borderColor:"#4ade80",color:"#4ade80"}} onClick={()=>setReservasExt(true)} className="hide-mobile">⭐ Reservas</button>}
+            {can("ver_dashboard")&&<button style={{...S.outlineBtn,borderColor:"#f472b6",color:"#f472b6"}} onClick={()=>setDashboard(true)} className="hide-mobile">📊 Dashboard</button>}
+            {can("vista_docentes")&&<button style={{...S.outlineBtn,borderColor:"#60a5fa",color:"#60a5fa"}} onClick={()=>setTeacherView(true)} className="hide-mobile">👤 Docentes</button>}
+            {isSuperAdmin&&<button style={{...S.outlineBtn,borderColor:"#818cf8",color:"#818cf8"}} onClick={()=>setUserManager(true)} className="hide-mobile">👥 Usuarios</button>}
             <button onClick={toggle} title={theme==="dark"?"Modo claro":"Modo oscuro"}
               style={{background:"transparent",border:`1px solid ${T.border2}`,borderRadius:8,
                 padding:"6px 10px",cursor:"pointer",fontSize:16,color:T.text,
@@ -808,10 +823,10 @@ export default function App(){
                 onCellClick={r => {
                   if(r.tipo_reserva==="extraordinaria"||r.tipo_reserva==="bloqueo"){
                     const roomExtras = reservations.filter(x=>
-  x.room===r.room && x.day===r.day &&
-  (x.tipo_reserva==="extraordinaria"||x.tipo_reserva==="bloqueo") &&
-  (!x.specific_date || x.specific_date >= todayStr())
-).sort((a:any,b:any)=>a.specific_date>b.specific_date?1:-1);
+                      x.room===r.room && x.day===r.day &&
+                      (x.tipo_reserva==="extraordinaria"||x.tipo_reserva==="bloqueo") &&
+                      (!x.specific_date || x.specific_date >= todayStr())
+                    ).sort((a:any,b:any)=>a.specific_date>b.specific_date?1:-1);
                     setExtraModal({room:r.room, reservations:roomExtras});
                   }
                 }}
@@ -905,8 +920,8 @@ export default function App(){
                     </div>
                     <div style={{fontSize:11,color:T.muted,marginTop:2}}>
                       {reservations.filter(r=>r.day===selDay).length} reserva(s)
-                      {isSuperAdmin&&" · Hover para eliminar"}
-                      {isEditor&&" · Clic en celda vacía para reservar"}
+                      {canDelete&&" · Hover para eliminar"}
+                      {canCreate&&!canDelete&&" · Clic en celda vacía para reservar"}
                       {!canCreate&&" · Modo solo lectura"}
                     </div>
                   </div>
@@ -925,7 +940,6 @@ export default function App(){
                   <table style={{borderCollapse:"collapse",minWidth:currentRooms.length*100+90}}>
                     <thead>
                       <tr>
-                        {/* ← CAMBIO: header Hora más ancho */}
                         <th style={{...S.th,position:"sticky" as const,left:0,zIndex:10,textAlign:"left" as const,paddingLeft:8,width:80}}>Hora</th>
                         {currentRooms.map(room=>(
                           <th key={room} style={S.th}>
@@ -937,7 +951,6 @@ export default function App(){
                     <tbody>
                       {currentHours.map(hour=>(
                         <tr key={hour} style={{background:T.bg2}}>
-                          {/* ← CAMBIO: mostrar rango "06:00 a 07:00" */}
                           <td style={S.hourTd}>
                             <span style={{display:"block",fontSize:11,fontWeight:700}}>{hour}</span>
                             <span style={{display:"block",fontSize:9,color:T.muted,fontWeight:400}}>
@@ -976,10 +989,10 @@ export default function App(){
                                     title={tooltipText}
                                     onClick={()=>{
                                       const roomExtras=reservations.filter(r=>
-  r.room===room&&r.day===selDay&&
-  (r.tipo_reserva==="extraordinaria"||r.tipo_reserva==="bloqueo") &&
-  (!r.specific_date || r.specific_date >= todayStr())
-).sort((a,b)=>a.specific_date>b.specific_date?1:-1);
+                                        r.room===room&&r.day===selDay&&
+                                        (r.tipo_reserva==="extraordinaria"||r.tipo_reserva==="bloqueo")&&
+                                        (!r.specific_date || r.specific_date >= todayStr())
+                                      ).sort((a,b)=>a.specific_date>b.specific_date?1:-1);
                                       setExtraModal({room,reservations:roomExtras});
                                     }}
                                     style={{height:"100%",borderRadius:5,padding:"3px 6px",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",background:"rgba(147,51,234,0.22)",borderLeft:"3px solid #9333ea",border:"1px dashed #9333ea",cursor:"pointer",gap:2,transition:"background .15s"}}
@@ -996,10 +1009,10 @@ export default function App(){
                                     onClick={()=>{
                                       if(isExtra&&isFirst){
                                         const roomExtras=reservations.filter(r=>
-  r.room===res.room&&r.day===selDay&&
-  (r.tipo_reserva==="extraordinaria"||r.tipo_reserva==="bloqueo") &&
-  (!r.specific_date || r.specific_date >= todayStr())
-).sort((a,b)=>a.specific_date>b.specific_date?1:-1);
+                                          r.room===res.room&&r.day===selDay&&
+                                          (r.tipo_reserva==="extraordinaria"||r.tipo_reserva==="bloqueo")&&
+                                          (!r.specific_date || r.specific_date >= todayStr())
+                                        ).sort((a,b)=>a.specific_date>b.specific_date?1:-1);
                                         setExtraModal({room:res.room,reservations:roomExtras});
                                       }
                                     }}
@@ -1079,10 +1092,20 @@ export default function App(){
         {spacesModal&&<SpacesManager session={session} onClose={()=>{setSpacesModal(false);loadSpaces();}}/>}
         {dashboard&&<Dashboard reservations={reservations} spaces={spaces} session={session} onClose={()=>setDashboard(false)}/>}
         {reservasExt&&(
-          <ReservasExtraordinarias session={session} reservations={reservations} spaces={spaces}
-            onClose={()=>setReservasExt(false)} onSaved={()=>{setReservasExt(false);load();}}/>
+          <ReservasExtraordinarias
+            session={session}
+            reservations={reservations}
+            spaces={filtrarEspacios(spaces)}
+            onClose={()=>setReservasExt(false)}
+            onSaved={()=>{setReservasExt(false);load();}}/>
         )}
         {teacherView&&<TeacherView reservations={reservations} onClose={()=>setTeacherView(false)}/>}
+        {userManager&&(
+          <UserManager
+            session={session}
+            spaces={spaces}
+            onClose={()=>setUserManager(false)}/>
+        )}
 
         {extraModal&&(
           <div style={S.overlay} onClick={e=>{if(e.target===e.currentTarget)setExtraModal(null);}}>
@@ -1106,7 +1129,6 @@ export default function App(){
                     <div key={r.id} style={{background:T.bg2,borderRadius:10,padding:"12px 16px",border:`1px solid rgba(147,51,234,0.3)`,borderLeft:`3px solid ${isBloqueo?"#ef4444":"#9333ea"}`}}>
                       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
                         <span style={{fontSize:12,fontWeight:700,color:isBloqueo?"#f87171":"#c084fc"}}>{isBloqueo?"🔒 Bloqueo":"⭐ Extraordinaria"}</span>
-                        {/* ← CAMBIO: rango de hora en modal detalle */}
                         <span style={{fontSize:11,color:T.muted,background:T.bg3,padding:"2px 10px",borderRadius:99}}>
                           {r.hour_end && r.hour_end !== r.hour ? `${r.hour} a ${r.hour_end}` : hourRangeLabel(r.hour)}
                         </span>
@@ -1180,7 +1202,6 @@ export default function App(){
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
                   <div>
                     <label style={S.lbl}>Hora inicio *</label>
-                    {/* ← CAMBIO: muestra rango en selector */}
                     <select style={S.sel} value={form.hour} onChange={e=>upd({hour:e.target.value,hour_end:e.target.value})}>
                       <option value="">Seleccionar</option>
                       {HOURS.slice(0,-1).map((h,i)=>(
@@ -1190,7 +1211,6 @@ export default function App(){
                   </div>
                   <div>
                     <label style={S.lbl}>Hora fin *</label>
-                    {/* ← CAMBIO: muestra rango consolidado en selector fin */}
                     <select style={S.sel} value={form.hour_end} disabled={!form.hour} onChange={e=>upd({hour_end:e.target.value})}>
                       <option value="">Seleccionar</option>
                       {getEndHourOptions(form.hour).slice(1).map((h,i)=>(
@@ -1205,8 +1225,7 @@ export default function App(){
                   <div style={{background:T.bg,borderRadius:8,padding:"10px 14px",border:`1px solid ${T.border}`,fontSize:12}}>
                     <span style={{color:T.muted}}>Bloques: </span>
                     <span style={{color:"#60a5fa",fontWeight:600}}>
-                      {/* ← CAMBIO: mostrar bloques como rangos */}
-                      {getHoursBetween(form.hour,form.hour_end).map((h,i)=>(
+                      {getHoursBetween(form.hour,form.hour_end).map((h)=>(
                         `${h} a ${HOURS[HOURS.indexOf(h)+1]}`
                       )).join(" · ")}
                     </span>
