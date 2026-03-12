@@ -183,7 +183,11 @@ function runScheduler(
   const conflicts:   Conflict[]   = [];
 
   const { teoriaPool, labPool } = buildRoomPools(externalSpaces);
-
+// DEBUG — borra esto después de diagnosticar
+console.log("=== POOLS ===");
+console.log("teoriaPool:", teoriaPool.map(r => r.name));
+console.log("labPool:", labPool.map(r => r.name));
+console.log("externalSpaces activos:", externalSpaces?.filter((s:any) => s.activo).map((s:any) => `${s.nombre} (${s.tipo})`));
   const maxLabCap = labPool.length > 0
     ? Math.min(...labPool.map(r => r.capacity))
     : CAPACIDAD_MAX_LAB;
@@ -537,7 +541,9 @@ function runScheduler(
     // Intento 6 (solo teoría): sábado + sin ninguna restricción
     if (!candidates.length && req.type === "Teoría")
       candidates   = findCandidates(req, pool, false, false, true);
-
+if (candidates.length === 0) {
+  console.log(`SIN CANDIDATOS: ${req.subject} | tipo: ${req.type} | tipoEspacio: ${req.tipoEspacio} | pool: ${pool.map(r=>r.name)}`);
+}
     if (candidates.length > 0) {
       // Elegir el candidato con mejor score (incluye balanceo de carga)
       candidates.sort((a, b) => b.score - a.score);
