@@ -183,11 +183,7 @@ function runScheduler(
   const conflicts:   Conflict[]   = [];
 
   const { teoriaPool, labPool } = buildRoomPools(externalSpaces);
-// DEBUG — borra esto después de diagnosticar
-console.log("=== POOLS ===");
-console.log("teoriaPool:", teoriaPool.map(r => r.name));
-console.log("labPool:", labPool.map(r => r.name));
-console.log("externalSpaces activos:", externalSpaces?.filter((s:any) => s.activo).map((s:any) => `${s.nombre} (${s.tipo})`));
+
   const maxLabCap = labPool.length > 0
     ? Math.min(...labPool.map(r => r.capacity))
     : CAPACIDAD_MAX_LAB;
@@ -386,7 +382,11 @@ console.log("externalSpaces activos:", externalSpaces?.filter((s:any) => s.activ
           const cBlock  = block.some(h => cohortOccupied[day][h]?.[cohortKey]);
           const brBlock = block.some(h => teacherBreak[day][h]?.[req.teacher]);
           if (!tBlock && !cBlock && !brBlock) {
-                    }
+            console.log(`SLOT LIBRE ${req.subject} | ${day} ${start} | teacher=${req.teacher} | cohort=${cohortKey}`);
+          } else {
+            console.log(`SLOT BLOQUEADO ${req.subject} | ${day} ${start} | teacher=${tBlock} cohort=${cBlock} break=${brBlock}`);
+          }
+        }
         // ── FIN DEBUG ─────────────────────────────────────────────────────────
 
         // ── EVALUACIÓN DE TODAS LAS SALAS DISPONIBLES EN ESTE SLOT ──────────
