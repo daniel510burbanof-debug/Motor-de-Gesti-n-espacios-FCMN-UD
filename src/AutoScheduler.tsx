@@ -123,7 +123,8 @@ function splitLabRequests(requests: ClassRequest[], maxLabCap: number = CAPACIDA
     if (req.type !== "Laboratorio") { result.push(req); continue; }
     const n = Math.ceil(req.students / maxLabCap);
     if (n <= 1) { result.push({ ...req, subgroup: req.subgroup || SUBGROUP_LABELS[0] }); continue; }
-    const perGroup = Math.ceil(req.students / n);    for (let i = 0; i < n; i++) {
+    const perGroup = Math.ceil(req.students / n);
+    for (let i = 0; i < n; i++) {
       const label = SUBGROUP_LABELS[i] || `Lab ${String.fromCharCode(65+i)}`;
       result.push({
         ...req, id:`${req.id}-sg${i}`, parentId:req.id, subgroup:label,
@@ -142,10 +143,10 @@ function runScheduler(
   const assignments: Assignment[] = [];
   const conflicts: Conflict[] = [];
   const labSpaces = externalSpaces?.filter(s => s.tipo === "Laboratorio" && s.activo);
-const maxLabCap = labSpaces && labSpaces.length > 0
-  ? Math.min(...labSpaces.map((s: any) => s.capacidad))
-  : CAPACIDAD_MAX_LAB;
-const requests = splitLabRequests(rawRequests, maxLabCap);
+  const maxLabCap = labSpaces && labSpaces.length > 0
+    ? Math.min(...labSpaces.map((s: any) => s.capacidad))
+    : CAPACIDAD_MAX_LAB;
+  const requests = splitLabRequests(rawRequests, maxLabCap);
 
   type SlotMap = Record<string,Record<string,Record<string,boolean>>>;
   const roomOccupied:    SlotMap = {};
@@ -231,7 +232,6 @@ const requests = splitLabRequests(rawRequests, maxLabCap);
       ? DAYS.filter(d=>req.diasDisponibles!.includes(d)) : DAYS;
     const candidates: Array<{day:string;hour:string;block:string[];room:typeof pool[0];score:number}> = [];
 
-    outer:
     for (const day of diasValidos) {
       const sedeActual = cohortSedeDia[cohortKey]?.[day];
       if (sedeActual) {
@@ -289,8 +289,11 @@ const requests = splitLabRequests(rawRequests, maxLabCap);
           }
           const score = softScore(req, day, block, room as any);
           candidates.push({day, hour:start, block, room:room as any, score});
-          if (candidates.length>=5) break outer;
+          // ← FIX: solo rompe el loop de salas, continúa explorando días y horas
+          break;
         }
+        // ← MEJORA: límite de seguridad por rendimiento con archivos grandes
+        if (candidates.length >= 50) break;
       }
     }
 
@@ -421,7 +424,7 @@ const DEFAULT_PROGRAM_CONFIG: ProgramConfig[] = [
 export default function AutoScheduler({session,onClose,onSaved,spaces:externalSpaces}:AutoSchedulerProps) {
   const { T } = useTheme();
   const { isMobile } = useBreakpoint();
-  
+
   const [step,setStep]                   = useState<"upload"|"config"|"preview"|"done">("upload");
   const [requests,setRequests]           = useState<ClassRequest[]>([]);
   const [labAvail,setLabAvail]           = useState<LabAvailability[]>([]);
