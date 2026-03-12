@@ -256,6 +256,9 @@ function runScheduler(
     includeSabado: boolean,
   ) => {
     const cohortKey   = `${req.program}__${req.cohort}`;
+const effectiveCohortKey = (req.type === "Laboratorio" && req.subgroup)
+  ? `${req.program}__${req.cohort}__${req.subgroup}`
+  : cohortKey;
     const teoriaKey   = `${cohortKey}__${req.subject}`;
     const parentSlots = req.parentId ? (parentAssignedSlots[req.parentId] || []) : [];
     const teoriaOcup  = teoriaSlots[teoriaKey] || [];
@@ -298,7 +301,10 @@ function runScheduler(
         }
         if (block.some(h => teacherBreak[day][h]?.[req.teacher]))    continue;
         if (block.some(h => teacherOccupied[day][h]?.[req.teacher])) continue;
-        if (block.some(h => cohortOccupied[day][h]?.[cohortKey]))    continue;
+        const effectiveCohortKey = (req.type === "Laboratorio" && req.subgroup)
+          ? `${req.program}__${req.cohort}__${req.subgroup}`
+          : cohortKey;
+        if (block.some(h => cohortOccupied[day][h]?.[effectiveCohortKey])) continue;
 
         if (req.parentId) {
           const choca = parentSlots.some(ps => ps.day === day && ps.hours.some(h => block.includes(h)));
@@ -379,13 +385,16 @@ function runScheduler(
     best: { day:string; hour:string; block:string[]; room:RoomEntry; score:number },
   ) => {
     const cohortKey = `${req.program}__${req.cohort}`;
+    const effectiveCohortKey = (req.type === "Laboratorio" && req.subgroup)
+      ? `${req.program}__${req.cohort}__${req.subgroup}`
+      : cohortKey;
     const teoriaKey = `${cohortKey}__${req.subject}`;
     const { day, hour: start, block, room } = best;
 
     block.forEach(h => {
-      roomOccupied[day][h][room.name]      = true;
-      teacherOccupied[day][h][req.teacher] = true;
-      cohortOccupied[day][h][cohortKey]    = true;
+      roomOccupied[day][h][room.name]           = true;
+      teacherOccupied[day][h][req.teacher]      = true;
+      cohortOccupied[day][h][effectiveCohortKey] = true;
     });
     if (!cohortDayHours[cohortKey])      cohortDayHours[cohortKey] = {};
     if (!cohortDayHours[cohortKey][day]) cohortDayHours[cohortKey][day] = [];
