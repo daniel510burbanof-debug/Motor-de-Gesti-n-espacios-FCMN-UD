@@ -326,19 +326,25 @@ function runScheduler(
           if (!req.espacioEspecifico && req.type !== "Laboratorio") {
             if (room.subtipo !== req.tipoEspacio) continue;
           }
-          if (externalSpaces) {
-  const ext = externalSpaces.find((s: any) => s.nombre === room.name);
-  if (ext) {
-    const normT = (t: any): string => {
-      if (!t) return "";
-      const m = String(t).trim().match(/^(\d{1,2}):(\d{2})/);
-      return m ? `${m[1].padStart(2,"0")}:${m[2]}` : "";
-    };
-    const apertura = normT(ext.hora_apertura) || "06:00";
-    const cierre   = normT(ext.hora_cierre)   || "19:00";
-    if (block.some(h => h < apertura || h >= cierre)) continue;
-  }
-}
+         if (externalSpaces) {
+            const ext = externalSpaces.find((s: any) => s.nombre === room.name);
+            if (ext) {
+              // DEBUG
+              console.log(`HORARIO ${room.name}:`, 
+                JSON.stringify(ext.hora_apertura), typeof ext.hora_apertura,
+                "|", JSON.stringify(ext.hora_cierre), typeof ext.hora_cierre
+              );
+              const normT = (t: any): string => {
+                if (!t) return "";
+                const m = String(t).trim().match(/^(\d{1,2}):(\d{2})/);
+                return m ? `${m[1].padStart(2,"0")}:${m[2]}` : "";
+              };
+              const apertura = normT(ext.hora_apertura) || "06:00";
+              const cierre   = normT(ext.hora_cierre)   || "19:00";
+              console.log(`  → apertura="${apertura}" cierre="${cierre}" block[0]="${block[0]}"`);
+              if (block.some(h => h < apertura || h >= cierre)) continue;
+            }
+          }
           if (req.type === "Laboratorio" && labAvailability.length > 0) {
             const progTieneVentanas = labAvailability.some(la => la.program === req.program);
             if (progTieneVentanas) {
