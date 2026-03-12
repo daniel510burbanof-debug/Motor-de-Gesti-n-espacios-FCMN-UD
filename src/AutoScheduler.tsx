@@ -380,6 +380,19 @@ console.log("externalSpaces activos:", externalSpaces?.filter((s:any) => s.activ
           }
         }
 
+// ── DEBUG TEMPORAL ── ponlo aquí ─────────────────────────────────────
+        if (req.type === "Teoría") {
+          const tBlock  = block.some(h => teacherOccupied[day][h]?.[req.teacher]);
+          const cBlock  = block.some(h => cohortOccupied[day][h]?.[cohortKey]);
+          const brBlock = block.some(h => teacherBreak[day][h]?.[req.teacher]);
+          if (!tBlock && !cBlock && !brBlock) {
+            console.log(`SLOT LIBRE ${req.subject} | ${day} ${start} | teacher=${req.teacher} | cohort=${cohortKey}`);
+          } else {
+            console.log(`SLOT BLOQUEADO ${req.subject} | ${day} ${start} | teacher=${tBlock} cohort=${cBlock} break=${brBlock}`);
+          }
+        }
+        // ── FIN DEBUG ─────────────────────────────────────────────────────────
+
         // ── EVALUACIÓN DE TODAS LAS SALAS DISPONIBLES EN ESTE SLOT ──────────
         // A diferencia de antes (break en la primera sala), aquí evaluamos
         // todas las salas válidas del slot y las agregamos como candidatos
