@@ -153,23 +153,27 @@ function buildRoomPools(externalSpaces?: any[]): { teoriaPool: RoomEntry[]; labP
       const isLab     = s.tipo === "Laboratorio" || (hardcoded?.espacio === "lab");
       const subtipo   = s.tipo || hardcoded?.subtipo || "Aula";
       const entry: RoomEntry = {
-        name:     s.nombre,
-        capacity: s.capacidad,   // capacidad siempre desde BD
-        espacio:  isLab ? "lab" : "teoria",
-        subtipo,
+        name: s.nombre, capacity: s.capacidad,
+        espacio: isLab ? "lab" : "teoria", subtipo,
       };
       if (isLab) labPool.push(entry);
       else       teoriaPool.push(entry);
     }
-    return { teoriaPool, labPool };
+
+    // Fallback: si no hay aulas de teoría en BD, usar hardcoded
+    const finalTeoria = teoriaPool.length > 0
+      ? teoriaPool
+      : TEORIA_ROOMS.map(r => ({ ...r }));
+
+    return { teoriaPool: finalTeoria, labPool };
   }
-  // Fallback sin BD
+
+  // Fallback sin BD — NO TOCAR
   return {
     teoriaPool: TEORIA_ROOMS.map(r => ({ ...r })),
     labPool:    LAB_ROOMS.map(r => ({ ...r })),
   };
 }
-
 // ── MOTOR DE ASIGNACIÓN ───────────────────────────────────────────────────────
 function runScheduler(
   rawRequests: ClassRequest[], programConfig: ProgramConfig[],
@@ -410,10 +414,13 @@ function runScheduler(
             score: softScore(req, day, block, room),
           });
         }
-        // Límite de candidatos para rendimiento
-        if (candidates.length >= 100) break;
+        // Para teoría: con 1 candidato por slot es suficiente, seguir explorando días
+        // Para lab: recolectar más para mejor distribución
+        if (req.type === "Teoría" && candidates.length >= 30) break;
+        if (req.type === "Laboratorio" && candidates.length >= 100) break;
       }
-      if (candidates.length >= 100) break;
+      if (req.type === "Teoría" && candidates.length >= 30) break;
+      if (req.type === "Laboratorio" && candidates.length >= 100) break;
     }
 
     return candidates;
@@ -517,16 +524,19 @@ function runScheduler(
     }
 
     // 5 intentos en cascada: de más restrictivo a más flexible
-    // Sábado solo entra en el intento 5 como último recurso
-    let candidates = findCandidates(req, pool, true,  true,  false); // gap+sede, sin sábado
+    // Sábado solo entra como último recurso
+    let candidates = findCandidates(req, pool, true,  true,  false);
     if (!candidates.length)
-      candidates   = findCandidates(req, pool, false, true,  false); // sin gap, con sede, sin sábado
+      candidates   = findCandidates(req, pool, false, true,  false);
     if (!candidates.length)
-      candidates   = findCandidates(req, pool, true,  false, false); // con gap, sin sede, sin sábado
+      candidates   = findCandidates(req, pool, true,  false, false);
     if (!candidates.length)
-      candidates   = findCandidates(req, pool, false, false, false); // sin gap ni sede, sin sábado
+      candidates   = findCandidates(req, pool, false, false, false);
     if (!candidates.length)
-      candidates   = findCandidates(req, pool, false, false, true);  // último recurso: sábado
+      candidates   = findCandidates(req, pool, false, false, true);
+    // Intento 6 (solo teoría): sábado + sin ninguna restricción
+    if (!candidates.length && req.type === "Teoría")
+      candidates   = findCandidates(req, pool, false, false, true);
 
     if (candidates.length > 0) {
       // Elegir el candidato con mejor score (incluye balanceo de carga)
