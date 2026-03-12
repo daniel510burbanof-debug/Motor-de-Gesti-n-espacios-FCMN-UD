@@ -327,13 +327,18 @@ function runScheduler(
             if (room.subtipo !== req.tipoEspacio) continue;
           }
           if (externalSpaces) {
-            const ext = externalSpaces.find((s: any) => s.nombre === room.name);
-            if (ext) {
-              const apertura = ext.hora_apertura ? String(ext.hora_apertura).substring(0, 5) : "06:00";
-              const cierre   = ext.hora_cierre   ? String(ext.hora_cierre).substring(0, 5)   : "19:00";
-              if (block.some(h => h < apertura || h >= cierre)) continue;
-            }
-          }
+  const ext = externalSpaces.find((s: any) => s.nombre === room.name);
+  if (ext) {
+    const normT = (t: any): string => {
+      if (!t) return "";
+      const m = String(t).trim().match(/^(\d{1,2}):(\d{2})/);
+      return m ? `${m[1].padStart(2,"0")}:${m[2]}` : "";
+    };
+    const apertura = normT(ext.hora_apertura) || "06:00";
+    const cierre   = normT(ext.hora_cierre)   || "19:00";
+    if (block.some(h => h < apertura || h >= cierre)) continue;
+  }
+}
           if (req.type === "Laboratorio" && labAvailability.length > 0) {
             const progTieneVentanas = labAvailability.some(la => la.program === req.program);
             if (progTieneVentanas) {
