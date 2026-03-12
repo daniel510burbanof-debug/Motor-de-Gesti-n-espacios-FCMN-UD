@@ -283,7 +283,11 @@ function runScheduler(
       const existeTeoria = assignments.some(a => a.day === day && a.tipo_espacio === "teoria" && `${a.request.program}__${a.request.cohort}` === cohortKey);
       const sedeConflicto = (req.type === "Laboratorio" && existeTeoria) || (req.type === "Teoría" && existeLab);
       if (sedeModo === "hard" && sedeConflicto) continue;
-
+      // DEBUG LOG 1 ─────────────────────────────────────────────────────────
+      if (req.type === "Teoría") {
+        console.log(`DIA ${req.subject} | ${day} | sedeConflicto=${sedeConflicto} | sedeModo=${sedeModo} | teacherOcup=${HOURS.some(h=>teacherOccupied[day][h]?.[req.teacher])} | cohortOcup=${HOURS.some(h=>cohortOccupied[day][h]?.[`${req.program}__${req.cohort}`])}`);
+      }
+      // FIN LOG 1 ───────────────────────────────────────────────────────────
       for (let hi = 0; hi <= HOURS.length - req.hoursBlock; hi++) {
         const start = HOURS[hi];
         const block = getBlock(start, req.hoursBlock);
@@ -320,7 +324,11 @@ function runScheduler(
             }
           }
         }
-
+// DEBUG LOG 2 ─────────────────────────────────────────────────────
+          if (req.type === "Teoría") {
+            console.log(`SLOT TEORIA ${req.subject} | ${day} ${start} | pool=${sortedPool.map(r=>r.name+"/"+r.subtipo)}`);
+          }
+          // FIN LOG 2 ───────────────────────────────────────────────────────
         for (const room of sortedPool) {
           if (block.some(h => roomOccupied[day][h]?.[room.name])) continue;
           if (!req.espacioEspecifico && req.type !== "Laboratorio") {
