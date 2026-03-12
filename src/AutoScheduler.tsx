@@ -3,7 +3,6 @@ import * as XLSX from "xlsx";
 import { useTheme } from "./ThemeContext";
 import { useBreakpoint } from "./useIsMobile";
 
-
 const CAPACIDAD_MAX_LAB = 15;
 const SUPABASE_URL = "https://wlisbvcqqjlgzfvbnscp.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndsaXNidmNxcWpsZ3pmdmJuc2NwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI0Njg5MDIsImV4cCI6MjA4ODA0NDkwMn0.66Ly-QcVzj0rM5DyH6o3NDE-jfPSlPgRuJYyTDMlW4g";
@@ -141,209 +140,327 @@ function runScheduler(
   labAvailability: LabAvailability[], externalSpaces?: any[],
 ): { assignments: Assignment[]; conflicts: Conflict[] } {
   const assignments: Assignment[] = [];
-  const conflicts: Conflict[] = [];
+  const conflicts:   Conflict[]   = [];
+
   const labSpaces = externalSpaces?.filter(s => s.tipo === "Laboratorio" && s.activo);
   const maxLabCap = labSpaces && labSpaces.length > 0
     ? Math.min(...labSpaces.map((s: any) => s.capacidad))
     : CAPACIDAD_MAX_LAB;
   const requests = splitLabRequests(rawRequests, maxLabCap);
 
-  type SlotMap = Record<string,Record<string,Record<string,boolean>>>;
+  // ── ESTRUCTURAS DE OCUPACIÓN ──────────────────────────────────────────────
+  type SlotMap = Record<string, Record<string, Record<string, boolean>>>;
   const roomOccupied:    SlotMap = {};
   const teacherOccupied: SlotMap = {};
   const cohortOccupied:  SlotMap = {};
   const teacherBreak:    SlotMap = {};
-  const cohortSedeDia: Record<string,Record<string,"teoria"|"lab">> = {};
-  const cohortDayHours: Record<string,Record<string,number[]>> = {};
-  const programDaySemesters: Record<string,Set<number>> = {};
-  const parentAssignedSlots: Record<string,Array<{day:string;hours:string[]}>> = {};
-  const parentRoomPreference: Record<string,string> = {};
-  const teoriaSlots: Record<string,Array<{day:string;hours:string[]}>> = {};
+  const cohortDayHours:  Record<string, Record<string, number[]>> = {};
+  const programDaySemesters: Record<string, Set<number>> = {};
+  const parentAssignedSlots: Record<string, Array<{day:string; hours:string[]}>> = {};
+  const parentRoomPreference: Record<string, string> = {};
+  const teoriaSlots: Record<string, Array<{day:string; hours:string[]}>> = {};
 
   DAYS.forEach(d => {
-    roomOccupied[d]={}; teacherOccupied[d]={}; cohortOccupied[d]={}; teacherBreak[d]={};
-    HOURS.forEach(h => { roomOccupied[d][h]={}; teacherOccupied[d][h]={}; cohortOccupied[d][h]={}; teacherBreak[d][h]={}; });
+    roomOccupied[d] = {}; teacherOccupied[d] = {};
+    cohortOccupied[d] = {}; teacherBreak[d] = {};
+    HOURS.forEach(h => {
+      roomOccupied[d][h] = {}; teacherOccupied[d][h] = {};
+      cohortOccupied[d][h] = {}; teacherBreak[d][h] = {};
+    });
   });
 
-  const sorted = [
-    ...requests.filter(r=>r.type==="Teoría").sort((a,b)=>b.hoursBlock-a.hoursBlock),
-    ...requests.filter(r=>r.type==="Laboratorio").sort((a,b)=>b.hoursBlock-a.hoursBlock),
-  ];
-
-  const softScore = (req: ClassRequest, day: string, block: string[], room: {name:string;capacity:number}): number => {
+  // ── ORDENAR POR "MÁS DIFÍCIL DE UBICAR PRIMERO" ──────────────────────────
+  // Labs primero, luego por horas, días restringidos, espacio fijo, estudiantes
+  const difficultyScore = (r: ClassRequest): number => {
     let score = 0;
-    const pdKey = `${req.program}|${day}`;
-    const semsEnDia = programDaySemesters[pdKey] || new Set<number>();
-    if (semsEnDia.has(req.cohortNumber-1) || semsEnDia.has(req.cohortNumber+1)) score -= 10; else score += 5;
-    if (req.hoursBlock%2!==0) {
-      const yaUsado = assignments.some(a=>a.room===room.name&&a.day===day&&a.request.type===req.type);
-      if (yaUsado) score += 8;
-    }
-    if (block[0]<"12:00") score += 3;
-    if (room.capacity-req.students>30) score -= 2;
+    if (r.type === "Laboratorio") score += 1000;
+    score += r.hoursBlock * 100;
+    if (r.diasDisponibles && r.diasDisponibles.length > 0)
+      score += (6 - r.diasDisponibles.length) * 50;
+    if (r.espacioEspecifico) score += 200;
+    score += r.students;
     return score;
   };
 
-  for (const req of sorted) {
-    let assigned = false;
+  const sorted = [...requests].sort((a, b) => difficultyScore(b) - difficultyScore(a));
+
+  // ── SCORE SOFT ────────────────────────────────────────────────────────────
+  const softScore = (
+    req: ClassRequest, day: string,
+    block: string[], room: {name:string; capacity:number}
+  ): number => {
+    let score = 0;
+    const pdKey = `${req.program}|${day}`;
+    const semsEnDia = programDaySemesters[pdKey] || new Set<number>();
+    if (semsEnDia.has(req.cohortNumber - 1) || semsEnDia.has(req.cohortNumber + 1))
+      score -= 10; else score += 5;
+    if (req.hoursBlock % 2 !== 0) {
+      const yaUsado = assignments.some(
+        a => a.room === room.name && a.day === day && a.request.type === req.type
+      );
+      if (yaUsado) score += 8;
+    }
+    if (block[0] < "12:00") score += 3;
+    if (room.capacity - req.students > 30) score -= 2;
+    return score;
+  };
+
+  // ── BÚSQUEDA DE CANDIDATOS ────────────────────────────────────────────────
+  const findCandidates = (
+    req: ClassRequest,
+    pool: typeof TEORIA_ROOMS,
+    respectarGap: boolean,
+    respectarSede: boolean,
+  ) => {
+    const cohortKey     = `${req.program}__${req.cohort}`;
+    const teoriaKey     = `${cohortKey}__${req.subject}`;
+    const parentSlots   = req.parentId ? (parentAssignedSlots[req.parentId] || []) : [];
+    const teoriaOcup    = teoriaSlots[teoriaKey] || [];
+    const preferredRoom = req.parentId ? parentRoomPreference[req.parentId] : undefined;
+    const sortedPool    = (preferredRoom && !req.espacioEspecifico)
+      ? [...pool].sort((a, b) => a.name === preferredRoom ? -1 : b.name === preferredRoom ? 1 : 0)
+      : pool;
+    const diasValidos   = req.diasDisponibles && req.diasDisponibles.length > 0
+      ? DAYS.filter(d => req.diasDisponibles!.includes(d)) : DAYS;
+
+    const candidates: Array<{
+      day: string; hour: string; block: string[];
+      room: typeof pool[0]; score: number;
+    }> = [];
+
+    for (const day of diasValidos) {
+
+      // ── RESTRICCIÓN DE SEDE: días exclusivos lab/teoría por cohorte ───────
+      if (respectarSede) {
+        const existeLab    = assignments.some(a =>
+          a.day === day && a.tipo_espacio === "lab" &&
+          `${a.request.program}__${a.request.cohort}` === cohortKey
+        );
+        const existeTeoria = assignments.some(a =>
+          a.day === day && a.tipo_espacio === "teoria" &&
+          `${a.request.program}__${a.request.cohort}` === cohortKey
+        );
+        if (req.type === "Laboratorio" && existeTeoria) continue;
+        if (req.type === "Teoría"      && existeLab)    continue;
+      }
+
+      for (let hi = 0; hi <= HOURS.length - req.hoursBlock; hi++) {
+        const start = HOURS[hi];
+        const block = getBlock(start, req.hoursBlock);
+        if (block.length < req.hoursBlock) continue;
+
+        // Ventana horaria del request
+        if (req.horaDesde && req.horaHasta) {
+          if (start < req.horaDesde || block[block.length - 1] > req.horaHasta) continue;
+        }
+
+        // Restricciones de docente
+        if (block.some(h => teacherBreak[day][h]?.[req.teacher]))    continue;
+        if (block.some(h => teacherOccupied[day][h]?.[req.teacher])) continue;
+
+        // Restricción de cohorte
+        if (block.some(h => cohortOccupied[day][h]?.[cohortKey])) continue;
+
+        // Subgrupos del mismo padre no se solapan
+        if (req.parentId) {
+          const choca = parentSlots.some(
+            ps => ps.day === day && ps.hours.some(h => block.includes(h))
+          );
+          if (choca) continue;
+        }
+
+        // Lab no se solapa con teoría de la misma asignatura
+        if (req.type === "Laboratorio") {
+          const cruza = teoriaOcup.some(
+            ts => ts.day === day && ts.hours.some(h => block.includes(h))
+          );
+          if (cruza) continue;
+        }
+
+        // Restricción de gap entre clases (relajable en intento 2)
+        if (respectarGap) {
+          const cfg    = programConfig.find(p => p.program === req.program);
+          const maxGap = cfg?.maxGapHours ?? 999;
+          if (maxGap < 999) {
+            const existentes = cohortDayHours[cohortKey]?.[day] || [];
+            if (existentes.length > 0) {
+              const startIdx   = getHourIndex(start);
+              const minExist   = Math.min(...existentes);
+              const maxExist   = Math.max(...existentes);
+              const gapAntes   = startIdx - maxExist - 1;
+              const gapDespues = minExist - (startIdx + req.hoursBlock);
+              if (gapAntes   > maxGap) continue;
+              if (gapDespues > 0 && gapDespues > maxGap) continue;
+            }
+          }
+        }
+
+        // Buscar sala disponible en el pool
+        for (const room of sortedPool) {
+          if (block.some(h => roomOccupied[day][h]?.[room.name])) continue;
+
+          if (!req.espacioEspecifico && (room as any).subtipo &&
+              req.tipoEspacio !== "Laboratorio") {
+            if ((room as any).subtipo !== req.tipoEspacio) continue;
+          }
+
+          // Horario de apertura/cierre del espacio
+          if (externalSpaces) {
+            const ext = externalSpaces.find((s: any) => s.nombre === room.name);
+            if (ext && block.some(h => h < ext.hora_apertura || h >= ext.hora_cierre))
+              continue;
+          }
+
+          // Ventanas de disponibilidad de laboratorio
+          if (req.type === "Laboratorio" && labAvailability.length > 0) {
+            const progTieneVentanas = labAvailability.some(la => la.program === req.program);
+            if (progTieneVentanas) {
+              const ventanas = labAvailability.filter(
+                la => la.lab === room.name && la.program === req.program && la.day === day
+              );
+              if (ventanas.length === 0) continue;
+              const dentro = ventanas.some(v => block.every(h => h >= v.from && h < v.to));
+              if (!dentro) continue;
+            }
+          }
+
+          candidates.push({
+            day, hour: start, block,
+            room: room as any,
+            score: softScore(req, day, block, room as any),
+          });
+          break; // sala encontrada para este slot
+        }
+
+        if (candidates.length >= 50) break; // límite de rendimiento
+      }
+    }
+
+    return candidates;
+  };
+
+  // ── CONFIRMAR ASIGNACIÓN ──────────────────────────────────────────────────
+  const confirmarAsignacion = (req: ClassRequest, best: {
+    day: string; hour: string; block: string[];
+    room: typeof TEORIA_ROOMS[0]; score: number;
+  }) => {
     const cohortKey = `${req.program}__${req.cohort}`;
     const teoriaKey = `${cohortKey}__${req.subject}`;
+    const { day, hour: start, block, room } = best;
 
+    block.forEach(h => {
+      roomOccupied[day][h][room.name]      = true;
+      teacherOccupied[day][h][req.teacher] = true;
+      cohortOccupied[day][h][cohortKey]    = true;
+    });
+
+    if (!cohortDayHours[cohortKey])      cohortDayHours[cohortKey] = {};
+    if (!cohortDayHours[cohortKey][day]) cohortDayHours[cohortKey][day] = [];
+    block.forEach(h => cohortDayHours[cohortKey][day].push(getHourIndex(h)));
+
+    const pdKey = `${req.program}|${day}`;
+    if (!programDaySemesters[pdKey]) programDaySemesters[pdKey] = new Set();
+    programDaySemesters[pdKey].add(req.cohortNumber);
+
+    if (req.type === "Teoría") {
+      if (!teoriaSlots[teoriaKey]) teoriaSlots[teoriaKey] = [];
+      teoriaSlots[teoriaKey].push({ day, hours: block });
+    }
+
+    if (req.parentId) {
+      if (!parentAssignedSlots[req.parentId]) parentAssignedSlots[req.parentId] = [];
+      parentAssignedSlots[req.parentId].push({ day, hours: block });
+      if (!parentRoomPreference[req.parentId]) parentRoomPreference[req.parentId] = room.name;
+    }
+
+    if (req.hoursBlock >= 4) {
+      const bi = getHourIndex(start) + req.hoursBlock;
+      if (bi < HOURS.length) teacherBreak[day][HOURS[bi]][req.teacher] = true;
+    }
+
+    const subgroupLabel = req.subgroup ? ` · ${req.subgroup}` : "";
+    assignments.push({
+      request: req, day, hour: start,
+      hour_end: block[block.length - 1],
+      room: room.name,
+      tipo_espacio: req.type === "Laboratorio" ? "lab" : "teoria",
+      displayLabel: `${req.subject}${subgroupLabel}`,
+      score: best.score,
+    });
+  };
+
+  // ── LOOP PRINCIPAL ────────────────────────────────────────────────────────
+  for (const req of sorted) {
+
+    // Construir pool de espacios
     let basePool: typeof TEORIA_ROOMS = [];
-    if (req.type==="Laboratorio") {
+    if (req.type === "Laboratorio") {
       basePool = LAB_ROOMS as any;
     } else {
-      basePool = TEORIA_ROOMS.filter(r=>r.subtipo===req.tipoEspacio) as any;
+      basePool = TEORIA_ROOMS.filter(r => r.subtipo === req.tipoEspacio) as any;
       if (!basePool.length) basePool = TEORIA_ROOMS as any;
     }
 
     let pool = basePool.filter(r => {
       if (r.capacity < req.students) return false;
       if (externalSpaces) {
-        const ext = externalSpaces.find((s:any)=>s.nombre===r.name);
+        const ext = externalSpaces.find((s: any) => s.nombre === r.name);
         if (ext && !ext.activo) return false;
       }
       return true;
-    }).sort((a,b)=>a.capacity-b.capacity);
+    }).sort((a, b) => a.capacity - b.capacity);
 
     if (req.espacioEspecifico) {
       const allRooms = [...TEORIA_ROOMS, ...LAB_ROOMS] as any[];
-      const forced = allRooms.find(r=>r.name===req.espacioEspecifico);
-      if (forced) {
-        pool = [forced];
-      } else {
-        conflicts.push({ request:req, reason:`Espacio específico "${req.espacioEspecifico}" no encontrado.`, type:"hard" });
+      const forced = allRooms.find(r => r.name === req.espacioEspecifico);
+      if (forced) { pool = [forced]; }
+      else {
+        conflicts.push({
+          request: req,
+          reason: `Espacio específico "${req.espacioEspecifico}" no encontrado.`,
+          type: "hard",
+        });
         continue;
       }
     }
 
-    if (pool.length===0) {
-      conflicts.push({ request:req, reason:`Sin espacio tipo "${req.tipoEspacio}" con capacidad ≥ ${req.students}.`, type:"hard" });
+    if (pool.length === 0) {
+      conflicts.push({
+        request: req,
+        reason: `Sin espacio tipo "${req.tipoEspacio}" con capacidad ≥ ${req.students}.`,
+        type: "hard",
+      });
       continue;
     }
 
-    const parentSlots = req.parentId ? (parentAssignedSlots[req.parentId]||[]) : [];
-    const teoriaOcup  = teoriaSlots[teoriaKey] || [];
-    const preferredRoom = req.parentId ? parentRoomPreference[req.parentId] : undefined;
-    const sortedPool = (preferredRoom && !req.espacioEspecifico)
-      ? [...pool].sort((a,b)=>a.name===preferredRoom?-1:b.name===preferredRoom?1:0)
-      : pool;
-    const diasValidos = req.diasDisponibles && req.diasDisponibles.length>0
-      ? DAYS.filter(d=>req.diasDisponibles!.includes(d)) : DAYS;
-    const candidates: Array<{day:string;hour:string;block:string[];room:typeof pool[0];score:number}> = [];
+    // INTENTO 1: todas las restricciones activas (gap + sede)
+    let candidates = findCandidates(req, pool, true, true);
 
-    for (const day of diasValidos) {
-      const sedeActual = cohortSedeDia[cohortKey]?.[day];
-      if (sedeActual) {
-        if (req.type==="Teoría"      && sedeActual==="lab")    continue;
-        if (req.type==="Laboratorio" && sedeActual==="teoria") continue;
-      }
-      for (let hi=0; hi<=HOURS.length-req.hoursBlock; hi++) {
-        const start = HOURS[hi];
-        const block = getBlock(start, req.hoursBlock);
-        if (block.length<req.hoursBlock) continue;
-        if (req.horaDesde && req.horaHasta) {
-          if (start<req.horaDesde || block[block.length-1]>req.horaHasta) continue;
-        }
-        if (block.some(h=>teacherBreak[day][h]?.[req.teacher])) continue;
-        if (block.some(h=>teacherOccupied[day][h]?.[req.teacher])) continue;
-        if (block.some(h=>cohortOccupied[day][h]?.[cohortKey])) continue;
-        if (req.parentId) {
-          const choca = parentSlots.some(ps=>ps.day===day&&ps.hours.some(h=>block.includes(h)));
-          if (choca) continue;
-        }
-        if (req.type==="Laboratorio") {
-          const cruza = teoriaOcup.some(ts=>ts.day===day&&ts.hours.some(h=>block.includes(h)));
-          if (cruza) continue;
-        }
-        const cfg = programConfig.find(p=>p.program===req.program);
-        const maxGap = cfg?.maxGapHours ?? 999;
-        if (maxGap<999) {
-          const existentes = cohortDayHours[cohortKey]?.[day] || [];
-          if (existentes.length>0) {
-            const startIdx=getHourIndex(start);
-            const minExist=Math.min(...existentes), maxExist=Math.max(...existentes);
-            const gapAntes=startIdx-maxExist-1;
-            const gapDespues=minExist-(startIdx+req.hoursBlock);
-            if (gapAntes>maxGap) continue;
-            if (gapDespues>0&&gapDespues>maxGap) continue;
-          }
-        }
-        for (const room of sortedPool) {
-          if (block.some(h=>roomOccupied[day][h]?.[room.name])) continue;
-          if (!req.espacioEspecifico && (room as any).subtipo && req.tipoEspacio!=="Laboratorio") {
-            if ((room as any).subtipo!==req.tipoEspacio) continue;
-          }
-          if (externalSpaces) {
-            const ext = externalSpaces.find((s:any)=>s.nombre===room.name);
-            if (ext) { if (block.some(h=>h<ext.hora_apertura||h>=ext.hora_cierre)) continue; }
-          }
-          if (req.type==="Laboratorio" && labAvailability.length>0) {
-            const progTieneVentanas = labAvailability.some(la=>la.program===req.program);
-            if (progTieneVentanas) {
-              const ventanas = labAvailability.filter(la=>la.lab===room.name&&la.program===req.program&&la.day===day);
-              if (ventanas.length===0) continue;
-              const dentro = ventanas.some(v=>block.every(h=>h>=v.from&&h<v.to));
-              if (!dentro) continue;
-            }
-          }
-          const score = softScore(req, day, block, room as any);
-          candidates.push({day, hour:start, block, room:room as any, score});
-          // ← FIX: solo rompe el loop de salas, continúa explorando días y horas
-          break;
-        }
-        // ← MEJORA: límite de seguridad por rendimiento con archivos grandes
-        if (candidates.length >= 50) break;
-      }
-    }
+    // INTENTO 2: relajar gap, mantener sede
+    if (candidates.length === 0)
+      candidates = findCandidates(req, pool, false, true);
 
-    if (candidates.length>0) {
-      candidates.sort((a,b)=>b.score-a.score);
-      const best = candidates[0];
-      const {day, hour:start, block, room} = best;
-      block.forEach(h=>{
-        roomOccupied[day][h][room.name]      = true;
-        teacherOccupied[day][h][req.teacher] = true;
-        cohortOccupied[day][h][cohortKey]    = true;
-      });
-      if (!cohortSedeDia[cohortKey]) cohortSedeDia[cohortKey]={};
-      cohortSedeDia[cohortKey][day] = req.type==="Laboratorio"?"lab":"teoria";
-      if (!cohortDayHours[cohortKey]) cohortDayHours[cohortKey]={};
-      if (!cohortDayHours[cohortKey][day]) cohortDayHours[cohortKey][day]=[];
-      block.forEach(h=>cohortDayHours[cohortKey][day].push(getHourIndex(h)));
-      const pdKey=`${req.program}|${day}`;
-      if (!programDaySemesters[pdKey]) programDaySemesters[pdKey]=new Set();
-      programDaySemesters[pdKey].add(req.cohortNumber);
-      if (req.type==="Teoría") {
-        if (!teoriaSlots[teoriaKey]) teoriaSlots[teoriaKey]=[];
-        teoriaSlots[teoriaKey].push({day, hours:block});
-      }
-      if (req.parentId) {
-        if (!parentAssignedSlots[req.parentId]) parentAssignedSlots[req.parentId]=[];
-        parentAssignedSlots[req.parentId].push({day,hours:block});
-        if (!parentRoomPreference[req.parentId]) parentRoomPreference[req.parentId]=room.name;
-      }
-      if (req.hoursBlock>=4) {
-        const bi=getHourIndex(start)+req.hoursBlock;
-        if (bi<HOURS.length) teacherBreak[day][HOURS[bi]][req.teacher]=true;
-      }
-      const subgroupLabel = req.subgroup ? ` · ${req.subgroup}` : "";
-      assignments.push({
-        request:req, day, hour:start, hour_end:block[block.length-1],
-        room:room.name, tipo_espacio:req.type==="Laboratorio"?"lab":"teoria",
-        displayLabel:`${req.subject}${subgroupLabel}`, score:best.score,
-      });
-      assigned = true;
-    }
-    if (!assigned) {
+    // INTENTO 3: relajar sede, mantener gap
+    if (candidates.length === 0)
+      candidates = findCandidates(req, pool, true, false);
+
+    // INTENTO 4: relajar todo (último recurso)
+    if (candidates.length === 0)
+      candidates = findCandidates(req, pool, false, false);
+
+    if (candidates.length > 0) {
+      candidates.sort((a, b) => b.score - a.score);
+      confirmarAsignacion(req, candidates[0]);
+    } else {
       conflicts.push({
-        request:req,
-        reason:`No hay cupo para "${req.subject}"${req.subgroup?` (${req.subgroup})`:""}`,
-        type:"hard",
+        request: req,
+        reason: `No hay cupo para "${req.subject}"${req.subgroup ? ` (${req.subgroup})` : ""}`,
+        type: "hard",
       });
     }
   }
-  return {assignments, conflicts};
+
+  return { assignments, conflicts };
 }
 
 // ── PARSER EXCEL ──────────────────────────────────────────────────────────────
@@ -495,8 +612,8 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
         {/* HEADER */}
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"18px 24px",borderBottom:`1px solid ${T.border}`}}>
           <div>
-            <div style={{fontSize:16,fontWeight:700,color:T.text,fontFamily:"Montserrat,sans-serif"}}>🤖 AutoScheduler — Motor v2 con 7 Restricciones</div>
-            <div style={{fontSize:11,color:T.muted,marginTop:3}}>Hard: Gaps · Docente · Subtipo · Sede · Labs · Espacio Específico · Soft: Semestres · Empaquetado</div>
+            <div style={{fontSize:16,fontWeight:700,color:T.text,fontFamily:"Montserrat,sans-serif"}}>🤖 AutoScheduler — Motor v3</div>
+            <div style={{fontSize:11,color:T.muted,marginTop:3}}>Hard: Docente · Cohorte · Subtipo · Labs · Espacio Fijo · Sede · Gap · Soft: Semestres · Empaquetado</div>
           </div>
           <button onClick={onClose} style={{background:"transparent",border:"none",color:T.muted,fontSize:22,cursor:"pointer"}}>✕</button>
         </div>
@@ -537,7 +654,7 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
 
               {error&&<div style={{background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.3)",color:"#f87171",padding:"12px 16px",borderRadius:8,fontSize:13}}>⚠ {error}</div>}
 
-              <div style={{display:"grid",gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",gap:16}}>
+              <div style={{display:"grid",gridTemplateColumns:isMobile?"1fr":"1fr 1fr",gap:16}}>
                 <div style={{background:T.bg2,borderRadius:10,padding:16,border:`1px solid ${T.border}`}}>
                   <div style={{fontSize:12,fontWeight:700,color:T.mutedL,marginBottom:10,textTransform:"uppercase" as const}}>📋 Columnas obligatorias</div>
                   {[["Programa","Química/Biología…"],["Semestre_Cohorte","Semestre 3"],["Asignatura","Nombre materia"],
@@ -577,7 +694,7 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
               <div style={{background:T.bg2,borderRadius:10,padding:16,border:`1px solid rgba(0,102,204,0.3)`}}>
                 <div style={{fontSize:14,fontWeight:700,color:T.text,marginBottom:4}}>⚙️ Configuración de Restricciones por Programa</div>
                 <div style={{fontSize:12,color:T.muted,marginBottom:16}}>Máximo de horas muertas entre clases del mismo semestre en un día.</div>
-                <div style={{display:"grid",gridTemplateColumns: isMobile ? "1fr" : "repeat(2,1fr)",gap:12}}>
+                <div style={{display:"grid",gridTemplateColumns:isMobile?"1fr":"repeat(2,1fr)",gap:12}}>
                   {programConfig.map((pc,i)=>(
                     <div key={pc.program} style={{background:T.bg,borderRadius:8,padding:"12px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",border:`1px solid ${T.border}`}}>
                       <div style={{display:"flex",alignItems:"center",gap:8}}>
@@ -633,7 +750,7 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
           {/* ══ STEP 3: PREVIEW ══ */}
           {step==="preview"&&(
             <div style={{display:"flex",flexDirection:"column",gap:20}}>
-              <div style={{display:"grid",gridTemplateColumns: isMobile ? "repeat(2,1fr)" : "repeat(4,1fr)",gap:12}}>
+              <div style={{display:"grid",gridTemplateColumns:isMobile?"repeat(2,1fr)":"repeat(4,1fr)",gap:12}}>
                 {[{label:"En Excel",value:requests.length,color:"#60a5fa",icon:"📋"},
                   {label:"Asignados",value:assignments.length,color:"#4ade80",icon:"✅"},
                   {label:"Splits Lab",value:splitCount,color:"#fb923c",icon:"✂️"},
