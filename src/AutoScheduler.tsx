@@ -385,9 +385,9 @@ function runScheduler(
           if (block.some(h => roomOccupied[day][h]?.[room.name])) continue;
 
           // Verificar subtipo para teoría
-          if (!req.espacioEspecifico && req.type !== "Laboratorio") {
-            if (room.subtipo !== req.tipoEspacio) continue;
-          }
+          // if (!req.espacioEspecifico && req.type !== "Laboratorio") {
+           // if (room.subtipo !== req.tipoEspacio) continue;
+         // }
 
           // Horario apertura/cierre del espacio
           if (externalSpaces) {
