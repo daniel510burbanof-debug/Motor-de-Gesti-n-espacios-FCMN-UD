@@ -68,6 +68,12 @@ interface Assignment {
 }
 interface Conflict { request: ClassRequest; reason: string; type: "hard"|"soft"; }
 
+// ── TIPO INTERNO DE SALA ──────────────────────────────────────────────────────
+interface RoomEntry {
+  name: string; capacity: number;
+  espacio: "teoria"|"lab"; subtipo: string;
+}
+
 // ── UTILIDADES ────────────────────────────────────────────────────────────────
 function normalizarPrograma(p: string): string {
   const s = p.toLowerCase().trim();
@@ -134,6 +140,42 @@ function splitLabRequests(requests: ClassRequest[], maxLabCap: number = CAPACIDA
   return result;
 }
 
+// ── CONSTRUIR POOLS MEZCLADOS CON EXTERNOS ────────────────────────────────────
+// Une las listas hardcodeadas con los espacios de la BD:
+//   · Si un espacio externo coincide por nombre → usa su capacidad (override)
+//   · Si un espacio externo NO existe en las listas → lo añade como sala nueva
+function buildRoomPools(externalSpaces?: any[]): { teoriaPool: RoomEntry[]; labPool: RoomEntry[] } {
+  const knownNames = new Set([
+    ...TEORIA_ROOMS.map(r => r.name),
+    ...LAB_ROOMS.map(r => r.name),
+  ]);
+
+  // Aplicar capacidad externa a salas hardcodeadas
+  const mergedTeoria: RoomEntry[] = TEORIA_ROOMS.map(r => {
+    const ext = externalSpaces?.find((s: any) => s.nombre === r.name);
+    return ext ? { ...r, capacity: ext.capacidad } : r;
+  });
+  const mergedLab: RoomEntry[] = LAB_ROOMS.map(r => {
+    const ext = externalSpaces?.find((s: any) => s.nombre === r.name);
+    return ext ? { ...r, capacity: ext.capacidad } : r;
+  });
+
+  // Espacios nuevos añadidos desde la UI que no están en las listas
+  const extraRooms: RoomEntry[] = (externalSpaces || [])
+    .filter((s: any) => s.activo && !knownNames.has(s.nombre))
+    .map((s: any) => ({
+      name:     s.nombre,
+      capacity: s.capacidad,
+      espacio:  s.tipo === "Laboratorio" ? "lab" as const : "teoria" as const,
+      subtipo:  s.tipo || "Aula",
+    }));
+
+  return {
+    teoriaPool: [...mergedTeoria, ...extraRooms.filter(r => r.espacio === "teoria")],
+    labPool:    [...mergedLab,    ...extraRooms.filter(r => r.espacio === "lab")],
+  };
+}
+
 // ── MOTOR DE ASIGNACIÓN ───────────────────────────────────────────────────────
 function runScheduler(
   rawRequests: ClassRequest[], programConfig: ProgramConfig[],
@@ -142,10 +184,14 @@ function runScheduler(
   const assignments: Assignment[] = [];
   const conflicts:   Conflict[]   = [];
 
-  const labSpaces = externalSpaces?.filter(s => s.tipo === "Laboratorio" && s.activo);
-  const maxLabCap = labSpaces && labSpaces.length > 0
-    ? Math.min(...labSpaces.map((s: any) => s.capacidad))
+  // ── POOLS MEZCLADOS ────────────────────────────────────────────────────────
+  const { teoriaPool, labPool } = buildRoomPools(externalSpaces);
+
+  // Capacidad máxima de lab (para split) = mínima entre todos los labs activos
+  const maxLabCap = labPool.length > 0
+    ? Math.min(...labPool.map(r => r.capacity))
     : CAPACIDAD_MAX_LAB;
+
   const requests = splitLabRequests(rawRequests, maxLabCap);
 
   // ── ESTRUCTURAS DE OCUPACIÓN ──────────────────────────────────────────────
@@ -170,7 +216,6 @@ function runScheduler(
   });
 
   // ── ORDENAR POR "MÁS DIFÍCIL DE UBICAR PRIMERO" ──────────────────────────
-  // Labs primero, luego por horas, días restringidos, espacio fijo, estudiantes
   const difficultyScore = (r: ClassRequest): number => {
     let score = 0;
     if (r.type === "Laboratorio") score += 1000;
@@ -181,13 +226,12 @@ function runScheduler(
     score += r.students;
     return score;
   };
-
   const sorted = [...requests].sort((a, b) => difficultyScore(b) - difficultyScore(a));
 
   // ── SCORE SOFT ────────────────────────────────────────────────────────────
   const softScore = (
     req: ClassRequest, day: string,
-    block: string[], room: {name:string; capacity:number}
+    block: string[], room: RoomEntry,
   ): number => {
     let score = 0;
     const pdKey = `${req.program}|${day}`;
@@ -208,7 +252,7 @@ function runScheduler(
   // ── BÚSQUEDA DE CANDIDATOS ────────────────────────────────────────────────
   const findCandidates = (
     req: ClassRequest,
-    pool: typeof TEORIA_ROOMS,
+    pool: RoomEntry[],
     respectarGap: boolean,
     respectarSede: boolean,
   ) => {
@@ -225,12 +269,12 @@ function runScheduler(
 
     const candidates: Array<{
       day: string; hour: string; block: string[];
-      room: typeof pool[0]; score: number;
+      room: RoomEntry; score: number;
     }> = [];
 
     for (const day of diasValidos) {
 
-      // ── RESTRICCIÓN DE SEDE: días exclusivos lab/teoría por cohorte ───────
+      // Días exclusivos lab/teoría por cohorte
       if (respectarSede) {
         const existeLab    = assignments.some(a =>
           a.day === day && a.tipo_espacio === "lab" &&
@@ -249,19 +293,14 @@ function runScheduler(
         const block = getBlock(start, req.hoursBlock);
         if (block.length < req.hoursBlock) continue;
 
-        // Ventana horaria del request
         if (req.horaDesde && req.horaHasta) {
           if (start < req.horaDesde || block[block.length - 1] > req.horaHasta) continue;
         }
 
-        // Restricciones de docente
         if (block.some(h => teacherBreak[day][h]?.[req.teacher]))    continue;
         if (block.some(h => teacherOccupied[day][h]?.[req.teacher])) continue;
+        if (block.some(h => cohortOccupied[day][h]?.[cohortKey]))    continue;
 
-        // Restricción de cohorte
-        if (block.some(h => cohortOccupied[day][h]?.[cohortKey])) continue;
-
-        // Subgrupos del mismo padre no se solapan
         if (req.parentId) {
           const choca = parentSlots.some(
             ps => ps.day === day && ps.hours.some(h => block.includes(h))
@@ -269,7 +308,6 @@ function runScheduler(
           if (choca) continue;
         }
 
-        // Lab no se solapa con teoría de la misma asignatura
         if (req.type === "Laboratorio") {
           const cruza = teoriaOcup.some(
             ts => ts.day === day && ts.hours.some(h => block.includes(h))
@@ -277,7 +315,6 @@ function runScheduler(
           if (cruza) continue;
         }
 
-        // Restricción de gap entre clases (relajable en intento 2)
         if (respectarGap) {
           const cfg    = programConfig.find(p => p.program === req.program);
           const maxGap = cfg?.maxGapHours ?? 999;
@@ -295,16 +332,15 @@ function runScheduler(
           }
         }
 
-        // Buscar sala disponible en el pool
         for (const room of sortedPool) {
           if (block.some(h => roomOccupied[day][h]?.[room.name])) continue;
 
-          if (!req.espacioEspecifico && (room as any).subtipo &&
-              req.tipoEspacio !== "Laboratorio") {
-            if ((room as any).subtipo !== req.tipoEspacio) continue;
+          // Verificar subtipo solo para teoría (no para lab ni override)
+          if (!req.espacioEspecifico && req.type !== "Laboratorio") {
+            if (room.subtipo !== req.tipoEspacio) continue;
           }
 
-          // Horario de apertura/cierre del espacio
+          // Horario apertura/cierre del espacio
           if (externalSpaces) {
             const ext = externalSpaces.find((s: any) => s.nombre === room.name);
             if (ext && block.some(h => h < ext.hora_apertura || h >= ext.hora_cierre))
@@ -324,15 +360,11 @@ function runScheduler(
             }
           }
 
-          candidates.push({
-            day, hour: start, block,
-            room: room as any,
-            score: softScore(req, day, block, room as any),
-          });
+          candidates.push({ day, hour: start, block, room, score: softScore(req, day, block, room) });
           break; // sala encontrada para este slot
         }
 
-        if (candidates.length >= 50) break; // límite de rendimiento
+        if (candidates.length >= 50) break;
       }
     }
 
@@ -340,10 +372,10 @@ function runScheduler(
   };
 
   // ── CONFIRMAR ASIGNACIÓN ──────────────────────────────────────────────────
-  const confirmarAsignacion = (req: ClassRequest, best: {
-    day: string; hour: string; block: string[];
-    room: typeof TEORIA_ROOMS[0]; score: number;
-  }) => {
+  const confirmarAsignacion = (
+    req: ClassRequest,
+    best: { day: string; hour: string; block: string[]; room: RoomEntry; score: number },
+  ) => {
     const cohortKey = `${req.program}__${req.cohort}`;
     const teoriaKey = `${cohortKey}__${req.subject}`;
     const { day, hour: start, block, room } = best;
@@ -392,29 +424,30 @@ function runScheduler(
   // ── LOOP PRINCIPAL ────────────────────────────────────────────────────────
   for (const req of sorted) {
 
-    // Construir pool de espacios
-    let basePool: typeof TEORIA_ROOMS = [];
+    // Construir pool según tipo de clase
+    let basePool: RoomEntry[] = [];
     if (req.type === "Laboratorio") {
-      basePool = LAB_ROOMS as any;
+      basePool = labPool;
     } else {
-      basePool = TEORIA_ROOMS.filter(r => r.subtipo === req.tipoEspacio) as any;
-      if (!basePool.length) basePool = TEORIA_ROOMS as any;
+      basePool = teoriaPool.filter(r => r.subtipo === req.tipoEspacio);
+      if (!basePool.length) basePool = teoriaPool; // fallback a todas las de teoría
     }
 
+    // Filtrar inactivos y sin capacidad suficiente
     let pool = basePool.filter(r => {
       if (r.capacity < req.students) return false;
-      if (externalSpaces) {
-        const ext = externalSpaces.find((s: any) => s.nombre === r.name);
-        if (ext && !ext.activo) return false;
-      }
+      const ext = externalSpaces?.find((s: any) => s.nombre === r.name);
+      if (ext && !ext.activo) return false;
       return true;
     }).sort((a, b) => a.capacity - b.capacity);
 
+    // Override de espacio específico
     if (req.espacioEspecifico) {
-      const allRooms = [...TEORIA_ROOMS, ...LAB_ROOMS] as any[];
+      const allRooms = [...teoriaPool, ...labPool];
       const forced = allRooms.find(r => r.name === req.espacioEspecifico);
-      if (forced) { pool = [forced]; }
-      else {
+      if (forced) {
+        pool = [forced];
+      } else {
         conflicts.push({
           request: req,
           reason: `Espacio específico "${req.espacioEspecifico}" no encontrado.`,
@@ -433,20 +466,14 @@ function runScheduler(
       continue;
     }
 
-    // INTENTO 1: todas las restricciones activas (gap + sede)
-    let candidates = findCandidates(req, pool, true, true);
-
-    // INTENTO 2: relajar gap, mantener sede
-    if (candidates.length === 0)
-      candidates = findCandidates(req, pool, false, true);
-
-    // INTENTO 3: relajar sede, mantener gap
-    if (candidates.length === 0)
-      candidates = findCandidates(req, pool, true, false);
-
-    // INTENTO 4: relajar todo (último recurso)
-    if (candidates.length === 0)
-      candidates = findCandidates(req, pool, false, false);
+    // 4 intentos en cascada: más restrictivo → más flexible
+    let candidates = findCandidates(req, pool, true,  true);   // gap + sede
+    if (!candidates.length)
+      candidates   = findCandidates(req, pool, false, true);   // sin gap, con sede
+    if (!candidates.length)
+      candidates   = findCandidates(req, pool, true,  false);  // con gap, sin sede
+    if (!candidates.length)
+      candidates   = findCandidates(req, pool, false, false);  // sin nada (último recurso)
 
     if (candidates.length > 0) {
       candidates.sort((a, b) => b.score - a.score);
@@ -605,6 +632,9 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
   const overrideCount = assignments.filter(a=>a.request.espacioEspecifico).length;
   const hardConflicts = conflicts.filter(c=>c.type==="hard");
 
+  // Mostrar cuántos espacios externos aporta la BD al motor
+  const { teoriaPool, labPool } = buildRoomPools(externalSpaces);
+
   return (
     <div style={Sty.overlay} onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
       <div style={Sty.box}>
@@ -613,7 +643,13 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"18px 24px",borderBottom:`1px solid ${T.border}`}}>
           <div>
             <div style={{fontSize:16,fontWeight:700,color:T.text,fontFamily:"Montserrat,sans-serif"}}>🤖 AutoScheduler — Motor v3</div>
-            <div style={{fontSize:11,color:T.muted,marginTop:3}}>Hard: Docente · Cohorte · Subtipo · Labs · Espacio Fijo · Sede · Gap · Soft: Semestres · Empaquetado</div>
+            <div style={{fontSize:11,color:T.muted,marginTop:3}}>
+              Hard: Docente · Cohorte · Subtipo · Labs · Espacio Fijo · Sede · Gap · Soft: Semestres · Empaquetado
+              {" · "}
+              <span style={{color:"#4ade80"}}>🏫 {teoriaPool.length} aulas</span>
+              {" · "}
+              <span style={{color:"#4ade80"}}>🔬 {labPool.length} labs</span>
+            </div>
           </div>
           <button onClick={onClose} style={{background:"transparent",border:"none",color:T.muted,fontSize:22,cursor:"pointer"}}>✕</button>
         </div>
@@ -660,7 +696,7 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
                   {[["Programa","Química/Biología…"],["Semestre_Cohorte","Semestre 3"],["Asignatura","Nombre materia"],
                     ["Tipo_Clase","Teoría o Laboratorio"],["Tipo_Espacio","Aula · Sala de Sistemas"],
                     ["Docente","Nombre completo"],["Horas_Bloque","1–4"],
-                    ["Estudiantes_Inscritos","Total (split auto si > 15)"]].map(([c,d])=>(
+                    ["Estudiantes_Inscritos","Total (split auto si > cap. lab)"]].map(([c,d])=>(
                     <div key={c} style={{display:"flex",gap:8,marginBottom:4,fontSize:11}}>
                       <span style={{color:"#60a5fa",fontWeight:600,minWidth:160,flexShrink:0}}>{c}</span>
                       <span style={{color:T.muted}}>{d}</span>
@@ -712,6 +748,22 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
                       </div>
                     </div>
                   ))}
+                </div>
+              </div>
+
+              {/* Resumen de espacios disponibles */}
+              <div style={{background:T.bg2,borderRadius:10,padding:16,border:`1px solid rgba(74,222,128,0.2)`}}>
+                <div style={{fontSize:13,fontWeight:700,color:T.text,marginBottom:10}}>🏛️ Espacios disponibles para este horario</div>
+                <div style={{display:"flex",gap:8,flexWrap:"wrap" as const}}>
+                  <span style={{fontSize:12,padding:"4px 12px",borderRadius:99,background:"rgba(96,165,250,0.1)",color:"#60a5fa",border:"1px solid rgba(96,165,250,0.3)"}}>
+                    🏫 Teoría: {teoriaPool.length} aulas
+                  </span>
+                  <span style={{fontSize:12,padding:"4px 12px",borderRadius:99,background:"rgba(74,222,128,0.1)",color:"#4ade80",border:"1px solid rgba(74,222,128,0.3)"}}>
+                    🔬 Labs: {labPool.length} laboratorios
+                  </span>
+                  <span style={{fontSize:12,padding:"4px 12px",borderRadius:99,background:"rgba(251,146,60,0.1)",color:"#fb923c",border:"1px solid rgba(251,146,60,0.3)"}}>
+                    ✂️ Cap. max lab: {labPool.length>0?Math.min(...labPool.map(r=>r.capacity)):CAPACIDAD_MAX_LAB} estudiantes
+                  </span>
                 </div>
               </div>
 
