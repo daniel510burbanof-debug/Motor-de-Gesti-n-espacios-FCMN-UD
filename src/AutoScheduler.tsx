@@ -408,8 +408,11 @@ console.log("externalSpaces activos:", externalSpaces?.filter((s:any) => s.activ
           // Horario apertura/cierre del espacio
           if (externalSpaces) {
             const ext = externalSpaces.find((s: any) => s.nombre === room.name);
-            if (ext && block.some(h => h < ext.hora_apertura || h >= ext.hora_cierre))
-              continue;
+            if (ext) {
+              const apertura = ext.hora_apertura ? String(ext.hora_apertura).substring(0, 5) : "06:00";
+              const cierre   = ext.hora_cierre   ? String(ext.hora_cierre).substring(0, 5)   : "19:00";
+              if (block.some(h => h < apertura || h >= cierre)) continue;
+            }
           }
 
           // Ventanas de disponibilidad de laboratorio
