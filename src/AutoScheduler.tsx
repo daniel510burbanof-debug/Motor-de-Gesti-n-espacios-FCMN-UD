@@ -146,7 +146,7 @@ function buildRoomPools(externalSpaces?: any[]): { teoriaPool: RoomEntry[]; labP
     for (const s of activeSpaces) {
       const hardcoded = allHardcoded.find(r => r.name === s.nombre);
       const isLab     = s.tipo === "Laboratorio" || (hardcoded?.espacio === "lab");
-      const subtipo   = s.tipo || hardcoded?.subtipo || "Aula";
+      const subtipo   = hardcoded?.subtipo || s.tipo || "Aula";
       const entry: RoomEntry = { name: s.nombre, capacity: s.capacidad, espacio: isLab ? "lab" : "teoria", subtipo };
       if (isLab) labPool.push(entry); else teoriaPool.push(entry);
     }
