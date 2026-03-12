@@ -45,7 +45,7 @@ const LAB_ROOMS = [
   { name:"Instrumental", capacity:CAPACIDAD_MAX_LAB, espacio:"lab" as const, subtipo:"Laboratorio" },
 ];
 
-const DAYS  = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
+const DAYS            = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
 const DAYS_SIN_SABADO = ["Lunes","Martes","Miércoles","Jueves","Viernes"];
 const HOURS = ["06:00","07:00","08:00","09:00","10:00","11:00",
                "12:00","13:00","14:00","15:00","16:00","17:00","18:00","19:00"];
@@ -139,8 +139,6 @@ function splitLabRequests(requests: ClassRequest[], maxLabCap: number = CAPACIDA
 }
 
 // ── CONSTRUIR POOLS DESDE LA BD (fuente de verdad) ───────────────────────────
-// Si hay externalSpaces, la BD manda completamente.
-// Los hardcoded solo sirven de fallback cuando no hay BD o para leer el subtipo.
 function buildRoomPools(externalSpaces?: any[]): { teoriaPool: RoomEntry[]; labPool: RoomEntry[] } {
   if (externalSpaces && externalSpaces.length > 0) {
     const activeSpaces = externalSpaces.filter((s: any) => s.activo);
@@ -160,20 +158,18 @@ function buildRoomPools(externalSpaces?: any[]): { teoriaPool: RoomEntry[]; labP
       else       teoriaPool.push(entry);
     }
 
-    // Fallback: si no hay aulas de teoría en BD, usar hardcoded
     const finalTeoria = teoriaPool.length > 0
       ? teoriaPool
       : TEORIA_ROOMS.map(r => ({ ...r }));
 
     return { teoriaPool: finalTeoria, labPool };
   }
-
-  // Fallback sin BD — NO TOCAR
   return {
     teoriaPool: TEORIA_ROOMS.map(r => ({ ...r })),
     labPool:    LAB_ROOMS.map(r => ({ ...r })),
   };
 }
+
 // ── MOTOR DE ASIGNACIÓN ───────────────────────────────────────────────────────
 function runScheduler(
   rawRequests: ClassRequest[], programConfig: ProgramConfig[],
@@ -183,11 +179,9 @@ function runScheduler(
   const conflicts:   Conflict[]   = [];
 
   const { teoriaPool, labPool } = buildRoomPools(externalSpaces);
-
   const maxLabCap = labPool.length > 0
     ? Math.min(...labPool.map(r => r.capacity))
     : CAPACIDAD_MAX_LAB;
-
   const requests = splitLabRequests(rawRequests, maxLabCap);
 
   // ── ESTRUCTURAS DE OCUPACIÓN ──────────────────────────────────────────────
@@ -201,7 +195,6 @@ function runScheduler(
   const parentAssignedSlots: Record<string, Array<{day:string; hours:string[]}>> = {};
   const parentRoomPreference: Record<string, string> = {};
   const teoriaSlots: Record<string, Array<{day:string; hours:string[]}>> = {};
-  // Contador de uso por sala para balanceo de carga
   const roomUsageCount: Record<string, number> = {};
 
   DAYS.forEach(d => {
@@ -214,34 +207,66 @@ function runScheduler(
   });
   [...teoriaPool, ...labPool].forEach(r => { roomUsageCount[r.name] = 0; });
 
-  // ── ORDEN: MÁS DIFÍCIL PRIMERO ────────────────────────────────────────────
+  // ── MEJORA 1: PRIORIZACIÓN EQUILIBRADA ───────────────────────────────────
+  // Ya no hay +1000 para labs. La dificultad se basa en escasez real:
+  // bloque largo + pocos días disponibles + espacio fijo = más difícil.
+  // Labs siguen teniendo una ventaja pequeña (+50) porque sus espacios
+  // son más escasos que las aulas de teoría.
   const difficultyScore = (r: ClassRequest): number => {
     let score = 0;
-    if (r.type === "Laboratorio") score += 1000;
-    score += r.hoursBlock * 100;
+    // Bloque largo es más difícil de encajar (peso principal)
+    score += r.hoursBlock * 150;
+    // Días restringidos = más difícil
     if (r.diasDisponibles && r.diasDisponibles.length > 0)
-      score += (6 - r.diasDisponibles.length) * 50;
-    if (r.espacioEspecifico) score += 200;
+      score += (6 - r.diasDisponibles.length) * 80;
+    // Espacio fijo = muy difícil
+    if (r.espacioEspecifico) score += 300;
+    // Labs tienen pool más pequeño → ligera ventaja, no absoluta
+    if (r.type === "Laboratorio") score += 50;
+    // Más estudiantes = más difícil (para labs, el split ya lo maneja)
     score += r.students;
     return score;
   };
-  const sorted = [...requests].sort((a, b) => difficultyScore(b) - difficultyScore(a));
+
+  // ── MEJORA 3: INTERCALADO POR COHORTE ────────────────────────────────────
+  // En lugar de todos los labs primero, agrupamos por cohorte y dentro
+  // de cada cohorte ordenamos por dificultad. Así teoría y lab de la
+  // misma cohorte compiten simultáneamente por los espacios.
+  const cohortOrder = new Map<string, number>();
+  let cohortIdx = 0;
+  // Primero recorrer en orden natural para asignar índice por primera aparición
+  for (const r of requests) {
+    const key = `${r.program}__${r.cohort}`;
+    if (!cohortOrder.has(key)) cohortOrder.set(key, cohortIdx++);
+  }
+
+  const sorted = [...requests].sort((a, b) => {
+    const ckA = `${a.program}__${a.cohort}`;
+    const ckB = `${b.program}__${b.cohort}`;
+    // Primero agrupar por cohorte (orden de aparición en el Excel)
+    const cohortDiff = (cohortOrder.get(ckA) ?? 0) - (cohortOrder.get(ckB) ?? 0);
+    if (cohortDiff !== 0) return cohortDiff;
+    // Dentro de la misma cohorte: más difícil primero
+    return difficultyScore(b) - difficultyScore(a);
+  });
 
   // ── SCORE SOFT ────────────────────────────────────────────────────────────
-  // Incluye balanceo de carga: penaliza salas muy usadas para distribuir mejor
   const softScore = (
     req: ClassRequest, day: string,
     block: string[], room: RoomEntry,
+    sedeViolation: boolean,   // ← nuevo parámetro
   ): number => {
     let score = 0;
 
-    // Semestres consecutivos en el mismo día → penalizar
+    // Penalizar fuertemente mezclar lab y teoría el mismo día
+    // (soft constraint — permite el slot pero lo hace poco atractivo)
+    if (sedeViolation) score -= 40;
+
     const pdKey = `${req.program}|${day}`;
     const semsEnDia = programDaySemesters[pdKey] || new Set<number>();
     if (semsEnDia.has(req.cohortNumber - 1) || semsEnDia.has(req.cohortNumber + 1))
       score -= 10; else score += 5;
 
-    // Empaquetado: preferir sala ya usada si bloque impar
     if (req.hoursBlock % 2 !== 0) {
       const yaUsado = assignments.some(
         a => a.room === room.name && a.day === day && a.request.type === req.type
@@ -249,17 +274,12 @@ function runScheduler(
       if (yaUsado) score += 8;
     }
 
-    // Preferir mañana
     if (block[0] < "12:00") score += 3;
-
-    // Penalizar sala sobredimensionada
     if (room.capacity - req.students > 30) score -= 2;
 
-    // BALANCEO DE CARGA: penalizar salas más usadas para distribuir
     const usage = roomUsageCount[room.name] || 0;
     score -= usage * 3;
 
-    // Preferir sala que ya usó el padre (subgrupos del mismo lab juntos)
     if (req.parentId) {
       const pref = parentRoomPreference[req.parentId];
       if (pref && pref !== room.name) score -= 5;
@@ -269,13 +289,14 @@ function runScheduler(
   };
 
   // ── BÚSQUEDA DE CANDIDATOS ────────────────────────────────────────────────
-  // Ahora evalúa TODAS las salas disponibles en cada slot (no solo la primera)
-  // para poder elegir la óptima por score
+  // MEJORA 2: sede ya NO es un continue duro — es una penalización de score.
+  // El parámetro respectarSede ahora solo controla si aplicamos la penalización
+  // estrictamente (bloqueo) o como soft constraint.
   const findCandidates = (
     req: ClassRequest,
     pool: RoomEntry[],
     respectarGap: boolean,
-    respectarSede: boolean,
+    sedeModo: "hard"|"soft"|"off",  // hard=bloqueo, soft=penalización, off=ignorar
     includeSabado: boolean,
   ) => {
     const cohortKey     = `${req.program}__${req.cohort}`;
@@ -284,19 +305,14 @@ function runScheduler(
     const teoriaOcup    = teoriaSlots[teoriaKey] || [];
     const preferredRoom = req.parentId ? parentRoomPreference[req.parentId] : undefined;
 
-    // Pool ordenado: preferir sala del padre si aplica, luego por capacidad ajustada
     const sortedPool = [...pool].sort((a, b) => {
       if (preferredRoom && !req.espacioEspecifico) {
         if (a.name === preferredRoom) return -1;
         if (b.name === preferredRoom) return 1;
       }
-      // Ordenar por capacidad más ajustada al grupo (menos desperdicio)
-      const wasteA = a.capacity - req.students;
-      const wasteB = b.capacity - req.students;
-      return wasteA - wasteB;
+      return (a.capacity - req.students) - (b.capacity - req.students);
     });
 
-    // Días válidos respetando sábado como último recurso
     let diasBase: string[];
     if (req.diasDisponibles && req.diasDisponibles.length > 0) {
       diasBase = req.diasDisponibles.filter(d => includeSabado ? true : d !== "Sábado");
@@ -311,38 +327,35 @@ function runScheduler(
 
     for (const day of diasBase) {
 
-      // Restricción de sede: días exclusivos lab/teoría por cohorte
-      if (respectarSede) {
-        const existeLab    = assignments.some(a =>
-          a.day === day && a.tipo_espacio === "lab" &&
-          `${a.request.program}__${a.request.cohort}` === cohortKey
-        );
-        const existeTeoria = assignments.some(a =>
-          a.day === day && a.tipo_espacio === "teoria" &&
-          `${a.request.program}__${a.request.cohort}` === cohortKey
-        );
-        if (req.type === "Laboratorio" && existeTeoria) continue;
-        if (req.type === "Teoría"      && existeLab)    continue;
-      }
+      // ── MEJORA 2: SEDE COMO SOFT CONSTRAINT ─────────────────────────────
+      const existeLab    = assignments.some(a =>
+        a.day === day && a.tipo_espacio === "lab" &&
+        `${a.request.program}__${a.request.cohort}` === cohortKey
+      );
+      const existeTeoria = assignments.some(a =>
+        a.day === day && a.tipo_espacio === "teoria" &&
+        `${a.request.program}__${a.request.cohort}` === cohortKey
+      );
+      const sedeConflicto =
+        (req.type === "Laboratorio" && existeTeoria) ||
+        (req.type === "Teoría"      && existeLab);
+
+      if (sedeModo === "hard" && sedeConflicto) continue;
+      // En modo "soft" y "off" dejamos pasar — el score lo penaliza
 
       for (let hi = 0; hi <= HOURS.length - req.hoursBlock; hi++) {
         const start = HOURS[hi];
         const block = getBlock(start, req.hoursBlock);
         if (block.length < req.hoursBlock) continue;
 
-        // Ventana horaria del request
         if (req.horaDesde && req.horaHasta) {
           if (start < req.horaDesde || block[block.length - 1] > req.horaHasta) continue;
         }
 
-        // Restricciones de docente
         if (block.some(h => teacherBreak[day][h]?.[req.teacher]))    continue;
         if (block.some(h => teacherOccupied[day][h]?.[req.teacher])) continue;
+        if (block.some(h => cohortOccupied[day][h]?.[cohortKey]))    continue;
 
-        // Restricción de cohorte
-        if (block.some(h => cohortOccupied[day][h]?.[cohortKey])) continue;
-
-        // Subgrupos del mismo padre no se solapan
         if (req.parentId) {
           const choca = parentSlots.some(
             ps => ps.day === day && ps.hours.some(h => block.includes(h))
@@ -350,7 +363,6 @@ function runScheduler(
           if (choca) continue;
         }
 
-        // Lab no se solapa con teoría de la misma asignatura
         if (req.type === "Laboratorio") {
           const cruza = teoriaOcup.some(
             ts => ts.day === day && ts.hours.some(h => block.includes(h))
@@ -358,7 +370,6 @@ function runScheduler(
           if (cruza) continue;
         }
 
-        // Restricción de gap entre clases
         if (respectarGap) {
           const cfg    = programConfig.find(p => p.program === req.program);
           const maxGap = cfg?.maxGapHours ?? 999;
@@ -376,20 +387,13 @@ function runScheduler(
           }
         }
 
-
-        // ── EVALUACIÓN DE TODAS LAS SALAS DISPONIBLES EN ESTE SLOT ──────────
-        // A diferencia de antes (break en la primera sala), aquí evaluamos
-        // todas las salas válidas del slot y las agregamos como candidatos
-        // separados para que el score decida cuál es la óptima.
         for (const room of sortedPool) {
           if (block.some(h => roomOccupied[day][h]?.[room.name])) continue;
 
-          // Verificar subtipo para teoría
-          // if (!req.espacioEspecifico && req.type !== "Laboratorio") {
-           // if (room.subtipo !== req.tipoEspacio) continue;
-         // }
+          if (!req.espacioEspecifico && req.type !== "Laboratorio") {
+            if (room.subtipo !== req.tipoEspacio) continue;
+          }
 
-          // Horario apertura/cierre del espacio
           if (externalSpaces) {
             const ext = externalSpaces.find((s: any) => s.nombre === room.name);
             if (ext) {
@@ -399,7 +403,6 @@ function runScheduler(
             }
           }
 
-          // Ventanas de disponibilidad de laboratorio
           if (req.type === "Laboratorio" && labAvailability.length > 0) {
             const progTieneVentanas = labAvailability.some(la => la.program === req.program);
             if (progTieneVentanas) {
@@ -412,18 +415,18 @@ function runScheduler(
             }
           }
 
-          // Sala válida → agregar como candidato con su score
+          // Pasar sedeConflicto al score para que penalice slots "sucios"
+          const sedeViolation = sedeModo === "soft" && sedeConflicto;
           candidates.push({
             day, hour: start, block, room,
-            score: softScore(req, day, block, room),
+            score: softScore(req, day, block, room, sedeViolation),
           });
         }
-        // Para teoría: con 1 candidato por slot es suficiente, seguir explorando días
-        // Para lab: recolectar más para mejor distribución
-        if (req.type === "Teoría" && candidates.length >= 30) break;
+
+        if (req.type === "Teoría"      && candidates.length >= 30)  break;
         if (req.type === "Laboratorio" && candidates.length >= 100) break;
       }
-      if (req.type === "Teoría" && candidates.length >= 30) break;
+      if (req.type === "Teoría"      && candidates.length >= 30)  break;
       if (req.type === "Laboratorio" && candidates.length >= 100) break;
     }
 
@@ -469,7 +472,6 @@ function runScheduler(
       if (bi < HOURS.length) teacherBreak[day][HOURS[bi]][req.teacher] = true;
     }
 
-    // Actualizar contador de uso para balanceo
     roomUsageCount[room.name] = (roomUsageCount[room.name] || 0) + 1;
 
     const subgroupLabel = req.subgroup ? ` · ${req.subgroup}` : "";
@@ -486,7 +488,6 @@ function runScheduler(
   // ── LOOP PRINCIPAL ────────────────────────────────────────────────────────
   for (const req of sorted) {
 
-    // Construir pool según tipo de clase
     let basePool: RoomEntry[] = [];
     if (req.type === "Laboratorio") {
       basePool = labPool;
@@ -501,7 +502,6 @@ function runScheduler(
       if (ext && !ext.activo) return false;
       return true;
     });
-    // No ordenar aquí — el score en findCandidates se encarga de la selección óptima
 
     if (req.espacioEspecifico) {
       const allRooms = [...teoriaPool, ...labPool];
@@ -527,25 +527,28 @@ function runScheduler(
       continue;
     }
 
-    // 5 intentos en cascada: de más restrictivo a más flexible
-    // Sábado solo entra como último recurso
-    let candidates = findCandidates(req, pool, true,  true,  false);
+    // ── CASCADA DE INTENTOS ───────────────────────────────────────────────
+    // Intento 1: todas las restricciones, sede como bloqueo duro
+    let candidates = findCandidates(req, pool, true,  "hard", false);
+    // Intento 2: relajar gap, sede sigue bloqueando
     if (!candidates.length)
-      candidates   = findCandidates(req, pool, false, true,  false);
+      candidates   = findCandidates(req, pool, false, "hard", false);
+    // Intento 3: con gap, sede como penalización (soft)
     if (!candidates.length)
-      candidates   = findCandidates(req, pool, true,  false, false);
+      candidates   = findCandidates(req, pool, true,  "soft", false);
+    // Intento 4: sin gap, sede como penalización (soft)
     if (!candidates.length)
-      candidates   = findCandidates(req, pool, false, false, false);
+      candidates   = findCandidates(req, pool, false, "soft", false);
+    // Intento 5: incluir sábado, sede soft
     if (!candidates.length)
-      candidates   = findCandidates(req, pool, false, false, true);
-    // Intento 6 (solo teoría): sábado + sin ninguna restricción
-    if (!candidates.length && req.type === "Teoría")
-      candidates   = findCandidates(req, pool, false, false, true);
-if (candidates.length === 0) {
-  console.log(`SIN CANDIDATOS: ${req.subject} | tipo: ${req.type} | tipoEspacio: ${req.tipoEspacio} | pool: ${pool.map(r=>r.name)}`);
-}
+      candidates   = findCandidates(req, pool, false, "soft", true);
+    // ── MEJORA 4: BACKTRACKING DE RESCATE ────────────────────────────────
+    // Último recurso: ignorar sede y gap completamente.
+    // La clase existe aunque viole la preferencia de días exclusivos.
+    if (!candidates.length)
+      candidates   = findCandidates(req, pool, false, "off",  true);
+
     if (candidates.length > 0) {
-      // Elegir el candidato con mejor score (incluye balanceo de carga)
       candidates.sort((a, b) => b.score - a.score);
       confirmarAsignacion(req, candidates[0]);
     } else {
@@ -702,6 +705,7 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
   const overrideCount = assignments.filter(a=>a.request.espacioEspecifico).length;
   const hardConflicts = conflicts.filter(c=>c.type==="hard");
   const sabadoCount   = assignments.filter(a=>a.day==="Sábado").length;
+  const sedeSoftCount = assignments.filter(a=>a.score<=-35).length;
 
   const { teoriaPool, labPool } = buildRoomPools(externalSpaces);
 
@@ -712,9 +716,9 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
         {/* HEADER */}
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"18px 24px",borderBottom:`1px solid ${T.border}`}}>
           <div>
-            <div style={{fontSize:16,fontWeight:700,color:T.text,fontFamily:"Montserrat,sans-serif"}}>🤖 AutoScheduler — Motor v4</div>
+            <div style={{fontSize:16,fontWeight:700,color:T.text,fontFamily:"Montserrat,sans-serif"}}>🤖 AutoScheduler — Motor v5</div>
             <div style={{fontSize:11,color:T.muted,marginTop:3}}>
-              Hard: Docente · Cohorte · Subtipo · Sede · Gap · Sábado como último recurso
+              Intercalado · Sede Soft · Rescate sin restricciones · Sábado como último recurso
               {" · "}<span style={{color:"#4ade80"}}>🏫 {teoriaPool.length} aulas · 🔬 {labPool.length} labs</span>
             </div>
           </div>
@@ -886,6 +890,7 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
               {splitCount>0&&<div style={{background:"rgba(74,222,128,0.07)",border:"1px solid rgba(74,222,128,0.25)",borderRadius:10,padding:"12px 16px",fontSize:13,color:"#86efac"}}>✂️ <b style={{color:"#4ade80"}}>{splitCount} subgrupos</b> generados automáticamente.</div>}
               {overrideCount>0&&<div style={{background:"rgba(251,146,60,0.07)",border:"1px solid rgba(251,146,60,0.25)",borderRadius:10,padding:"12px 16px",fontSize:13,color:"#fed7aa"}}>📌 <b style={{color:"#fb923c"}}>{overrideCount} clases</b> asignadas a espacio específico.</div>}
               {sabadoCount>0&&<div style={{background:"rgba(148,163,184,0.07)",border:"1px solid rgba(148,163,184,0.25)",borderRadius:10,padding:"12px 16px",fontSize:13,color:"#cbd5e1"}}>📅 <b style={{color:"#94a3b8"}}>{sabadoCount} clases</b> asignadas en sábado (último recurso).</div>}
+              {sedeSoftCount>0&&<div style={{background:"rgba(251,191,36,0.07)",border:"1px solid rgba(251,191,36,0.25)",borderRadius:10,padding:"12px 16px",fontSize:13,color:"#fde68a"}}>⚠️ <b style={{color:"#fbbf24"}}>{sedeSoftCount} clases</b> comparten día entre lab y teoría (restricción de sede relajada).</div>}
 
               <div style={{display:"flex",gap:8,alignItems:"center"}}>
                 <span style={{fontSize:12,color:T.muted,fontWeight:600}}>Ver:</span>
@@ -920,6 +925,7 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
                           const isSplit=!!a.request.parentId;
                           const isOverride=!!a.request.espacioEspecifico;
                           const isSabado=a.day==="Sábado";
+                          const isSedeSoft=a.score<=-35;
                           return(
                             <tr key={i} style={{background:i%2===0?T.bg2:T.bg,borderBottom:`1px solid ${T.border}30`}}>
                               <td style={{padding:"7px 10px"}}>
@@ -945,8 +951,8 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
                               </td>
                               <td style={{padding:"7px 10px",color:T.mutedL,whiteSpace:"nowrap" as const}}>{a.request.teacher}</td>
                               <td style={{padding:"7px 10px"}}>
-                                <span style={{color:isSabado?"#94a3b8":T.mutedL,fontWeight:isSabado?600:400}}>
-                                  {isSabado?"📅 ":""}{a.day}
+                                <span style={{color:isSabado?"#94a3b8":isSedeSoft?"#fbbf24":T.mutedL,fontWeight:isSabado||isSedeSoft?600:400}}>
+                                  {isSabado?"📅 ":isSedeSoft?"⚠️ ":""}{a.day}
                                 </span>
                               </td>
                               <td style={{padding:"7px 10px",color:"#60a5fa",fontFamily:"monospace",whiteSpace:"nowrap" as const}}>{a.hour} → {a.hour_end}</td>
@@ -1009,7 +1015,8 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
                 <span style={{color:"#4ade80",fontWeight:700}}>{savedCount} reservas</span> guardadas.
                 {splitCount>0&&<><br/><span style={{color:"#fb923c"}}>{splitCount} subgrupos</span> por capacidad.</>}
                 {overrideCount>0&&<><br/><span style={{color:"#fb923c"}}>{overrideCount} clases</span> con espacio específico.</>}
-                {sabadoCount>0&&<><br/><span style={{color:"#94a3b8"}}>{sabadoCount} clases</span> asignadas en sábado (último recurso).</>}
+                {sabadoCount>0&&<><br/><span style={{color:"#94a3b8"}}>{sabadoCount} clases</span> asignadas en sábado.</>}
+                {sedeSoftCount>0&&<><br/><span style={{color:"#fbbf24"}}>{sedeSoftCount} clases</span> con sede relajada (lab+teoría mismo día).</>}
                 {hardConflicts.length>0&&<><br/><span style={{color:"#f87171"}}>{hardConflicts.length} clases</span> sin espacio.</>}
               </div>
               <div style={{display:"flex",gap:10,justifyContent:"center"}}>
