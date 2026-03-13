@@ -475,8 +475,19 @@ function runScheduler(
     if (!candidates.length) candidates = findCandidates(req, pool, false, "off",  true);
 
     if (candidates.length > 0) {
-      candidates.sort((a, b) => b.score - a.score);
-      confirmarAsignacion(req, candidates[0]);
+      // Prioridad dura: si hay candidatos adyacentes a clases ya asignadas del mismo semestre,
+      // descartar todos los demás. Garantiza back-to-back sin depender del score.
+      const ck = `${req.program}__${req.cohort}`;
+      const adyacentes = candidates.filter(c => {
+        const existentes = cohortDayHours[ck]?.[c.day] || [];
+        if (existentes.length === 0) return false;
+        const si = getHourIndex(c.hour);
+        const ei = si + req.hoursBlock - 1;
+        return existentes.some(idx => idx === si - 1) || existentes.some(idx => idx === ei + 1);
+      });
+      const pool2 = adyacentes.length > 0 ? adyacentes : candidates;
+      pool2.sort((a, b) => b.score - a.score);
+      confirmarAsignacion(req, pool2[0]);
     } else {
       conflicts.push({
         request: req,
