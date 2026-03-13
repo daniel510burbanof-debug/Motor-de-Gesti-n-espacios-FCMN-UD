@@ -59,7 +59,10 @@ interface ClassRequest {
   subject: string; type: "Teoría"|"Laboratorio";
   tipoEspacio: "Aula"|"Sala de Sistemas"|"Laboratorio";
   teacher: string; hoursBlock: number; students: number;
-  // NUEVO: grupo explícito (ej. "G1", "G1-G2", "G3-G4")
+  // grupo: "G1", "G1-G2", "G3-G4", etc.
+  // REGLA: mismo subject + distinto grupo → pueden solaparse (distintos alumnos)
+  //        distintos subjects + mismo grupo → NUNCA se solapan
+  //        teacherOccupied bloquea mismo docente sin importar grupo
   grupo: string;
   subgroup?: string; parentId?: string;
   diasDisponibles?: string[]; horaDesde?: string; horaHasta?: string;
@@ -67,7 +70,9 @@ interface ClassRequest {
 }
 interface Assignment {
   request: ClassRequest; day: string; hour: string; hour_end: string;
-  room: string; tipo_espacio: "teoria"|"lab"; displayLabel: string; score: number;
+  room: string; tipo_espacio: "teoria"|"lab";
+  displayLabel: string; // incluye grupo p.ej. "Química General [G1-G2]"
+  score: number;
 }
 interface Conflict { request: ClassRequest; reason: string; type: "hard"|"soft"; }
 interface RoomEntry { name: string; capacity: number; espacio: "teoria"|"lab"; subtipo: string; }
@@ -114,13 +119,15 @@ function parsearHoras(raw?: string): { desde: string; hasta: string }|null {
 }
 function getHourIndex(h: string): number { return HOURS.indexOf(h); }
 
-// ── EXPLOSIÓN DE GRUPOS ───────────────────────────────────────────────────────
-// Req 2: Descompone "G1-G2" → ["G1","G2"]; "G1" → ["G1"]; "" → ["__NOGROUP__"]
-// La clave de cohortOccupied será program__cohort__grupoIndividual
+// ── EXPLOSIÓN DE GRUPOS ────────────────────────────────────────────────────────
+// "G1-G2" → ["G1","G2"] | "G1" → ["G1"] | "" → ["__NOGROUP__"]
+// La clave cohortOccupied = program__cohort__grupoIndividual__subject
+// Esto garantiza: mismo grupo, distinta materia → bloqueado
+//                 mismo grupo, misma materia (otro set) → irrelevante (mismo key ya marcado)
+//                 distinto grupo, cualquier materia → independiente
 function expandirGrupos(grupo: string): string[] {
   if (!grupo || !grupo.trim()) return ["__NOGROUP__"];
-  // Busca patrones como G1-G2, G3-G4, G1-G2-G3, etc.
-  // ── REGEX DE EXPLOSIÓN ── detecta "Gn" individuales dentro del string
+  // ── REGEX: extrae todos los "Gn" del string (G1, G2, G3, G4…)
   const individuales = grupo.match(/G\d+/g);
   if (individuales && individuales.length > 0) return individuales;
   return [grupo.trim()];
@@ -170,7 +177,15 @@ function buildRoomPools(externalSpaces?: any[]): { teoriaPool: RoomEntry[]; labP
   };
 }
 
-// ── MOTOR v5 OPTIMIZADO ───────────────────────────────────────────────────────
+// ── MOTOR v5 ──────────────────────────────────────────────────────────────────
+// REGLA DE SOLAPAMIENTO:
+//   ✅ Química G1-G2 (Prof A) PUEDE solapar con Química G3-G4 (Prof B) → distintos alumnos
+//   ❌ Química G1-G2 NO puede solapar con Matemáticas G1-G2 → mismos alumnos, distinta materia
+//   ❌ Prof A NO puede estar en dos lugares → teacherOccupied lo bloquea automáticamente
+//
+// IMPLEMENTACIÓN: cohortOccupied key = `program__cohort__grupoIndividual__subject`
+//   Así G1 ocupado por Química no bloquea G1 para… espera, SÍ lo bloquea (correcto).
+//   Y G3 no está bloqueado por G1 (correcto).
 function runScheduler(
   rawRequests: ClassRequest[], programConfig: ProgramConfig[],
   labAvailability: LabAvailability[], externalSpaces?: any[],
@@ -185,14 +200,17 @@ function runScheduler(
   type SlotMap = Record<string, Record<string, Record<string, boolean>>>;
   const roomOccupied:        SlotMap = {};
   const teacherOccupied:     SlotMap = {};
-  // Req 2: cohortOccupied clave = program__cohort__grupoIndividual
+  // CLAVE: program__cohort__grupoIndividual  (NO incluye subject)
+  // → G1 ocupado bloquea G1 para TODAS las materias (correcto)
+  // → G3 sigue libre aunque G1 esté ocupado (correcto)
   const cohortOccupied:      SlotMap = {};
   const teacherBreak:        SlotMap = {};
   const cohortDayHours:      Record<string, Record<string, number[]>> = {};
   const programDaySemesters: Record<string, Set<number>> = {};
   const parentAssignedSlots: Record<string, Array<{day:string; hours:string[]}>> = {};
   const parentRoomPreference:Record<string, string> = {};
-  // OPT 1b: teoriaSlots guarda índices numéricos {hi, len}
+  // CORRECCIÓN: teoriaKey incluye grupo → Lab G1 solo verifica Teoria G1,
+  //             no bloquea Lab G3 que puede correr paralelo con Teoria G3
   const teoriaSlots:         Record<string, Array<{day:string; hi:number; len:number}>> = {};
   const roomUsageCount:      Record<string, number> = {};
 
@@ -228,14 +246,11 @@ function runScheduler(
   });
 
   // ── softScore ─────────────────────────────────────────────────────────────
-  // OPT 1b: recibe hi numérico. Req 4: penalización sede = -2000
   const softScore = (
     req: ClassRequest, day: string, hi: number,
     room: RoomEntry, sedeViolation: boolean,
   ): number => {
     let score = 0;
-
-    // Req 4: penalización sede SEVERA (-2000) para forzar conflicto duro
     if (sedeViolation) score -= 2000;
 
     const pdKey = `${req.program}|${day}`;
@@ -243,7 +258,7 @@ function runScheduler(
     if (semsEnDia.has(req.cohortNumber - 1) || semsEnDia.has(req.cohortNumber + 1))
       score -= 10; else score += 5;
 
-    if (hi < 6) score += 3; // índice 6 = "12:00"
+    if (hi < 6) score += 3;
 
     const ck = `${req.program}__${req.cohort}`;
     const existentesHoy = cohortDayHours[ck]?.[day] || [];
@@ -269,7 +284,7 @@ function runScheduler(
       const demasiadoCerca = horasOpuestasIdx.some(th =>
         Math.abs(th - hi) <= 1 || Math.abs(th - ei) <= 1
       );
-      if (demasiadoCerca) score -= 2000; // Req 4: doble penalización si además está cerca
+      if (demasiadoCerca) score -= 2000;
     }
 
     if (room.capacity - req.students > 30) score -= 2;
@@ -286,14 +301,11 @@ function runScheduler(
       if (sgAdyacente) score += 30;
     }
 
-    // OPT 3: desempate estocástico
     score += Math.random() * 0.5;
     return score;
   };
 
   // ── findCandidates ─────────────────────────────────────────────────────────
-  // OPT 1a: recibe sortedPool ya ordenado (NO hace sort interno)
-  // Req 2: usa expandirGrupos para verificar ocupación por grupo individual
   const findCandidates = (
     req: ClassRequest,
     sortedPool: RoomEntry[],
@@ -302,15 +314,17 @@ function runScheduler(
     includeSabado: boolean,
   ) => {
     const cohortKey = `${req.program}__${req.cohort}`;
-    const teoriaKey   = `${cohortKey}__${req.subject}`;
-    const parentSlots = req.parentId ? (parentAssignedSlots[req.parentId] || []) : [];
-    const teoriaOcup  = teoriaSlots[teoriaKey] || [];
 
-    // ── EXPLOSIÓN DE GRUPOS para este request ──
-    // Req 2: los grupos individuales afectados por esta materia
+    // CORRECCIÓN CLAVE: teoriaKey incluye grupo para permitir solapamiento
+    // entre distintos grupos de la misma materia
+    // Ej: "Química General__G1-G2" y "Química General__G3-G4" son independientes
+    const teoriaKey  = `${cohortKey}__${req.subject}__${req.grupo}`;
+    const teoriaOcup = teoriaSlots[teoriaKey] || [];
+
+    // Grupos individuales que afectan a este request
     const gruposAfectados = expandirGrupos(req.grupo);
 
-    // OPT 1b: convertir hora constraints a índices una vez fuera de loops
+    const parentSlots = req.parentId ? (parentAssignedSlots[req.parentId] || []) : [];
     const hiDesde = req.horaDesde ? getHourIndex(req.horaDesde) : 0;
     const hiHasta = req.horaHasta ? getHourIndex(req.horaHasta) : HOURS.length - 1;
 
@@ -329,7 +343,7 @@ function runScheduler(
       for (let hi = 0; hi <= HOURS.length - req.hoursBlock; hi++) {
         if (hi < hiDesde || hi + req.hoursBlock - 1 > hiHasta) continue;
 
-        // Verificar teacher
+        // 1. Verificar docente
         let slotBlocked = false;
         for (let bi = hi; bi < hi + req.hoursBlock; bi++) {
           const h = HOURS[bi];
@@ -339,14 +353,18 @@ function runScheduler(
         }
         if (slotBlocked) continue;
 
-        // ── Req 2: VERIFICAR GRUPOS INDIVIDUALES ──
-        // Si CUALQUIER grupo afectado está ocupado en ese slot, descartar
+        // 2. Verificar grupos individuales en cohortOccupied
+        // Si CUALQUIER grupo de este request está ocupado → slot descartado
+        // Nota: cohortOccupied[day][h][program__cohort__G1] se marca para TODAS
+        // las materias que involucran G1, así que G1 nunca puede tener dos materias
+        // distintas al mismo tiempo (aunque G3 sí puede)
         let grupoBlocked = false;
         for (let bi = hi; bi < hi + req.hoursBlock; bi++) {
           const h = HOURS[bi];
           for (const g of gruposAfectados) {
-            const eck = `${req.program}__${req.cohort}__${g}`;
-            if (cohortOccupied[day][h]?.[eck]) { grupoBlocked = true; break; }
+            if (cohortOccupied[day][h]?.[`${req.program}__${req.cohort}__${g}`]) {
+              grupoBlocked = true; break;
+            }
           }
           if (grupoBlocked) break;
         }
@@ -357,7 +375,8 @@ function runScheduler(
           if (parentSlots.some(ps => ps.day === day && ps.hours.some(h => blockStr.includes(h)))) continue;
         }
 
-        // OPT 1b: teoriaOcup usa {hi, len} numéricos
+        // 3. Verificar que Lab no cruce con su Teoria del MISMO grupo
+        // (distinto grupo puede correr paralelo)
         if (req.type === "Laboratorio" && teoriaOcup.length > 0) {
           let cruza = false;
           for (const ts of teoriaOcup) {
@@ -440,27 +459,24 @@ function runScheduler(
   };
 
   // ── confirmarAsignacion ────────────────────────────────────────────────────
-  // Req 2: marca cohortOccupied por cada grupo individual del request
   const confirmarAsignacion = (
     req: ClassRequest,
     best: { day:string; hi:number; room:RoomEntry; score:number },
   ) => {
     const cohortKey = `${req.program}__${req.cohort}`;
-    const teoriaKey = `${cohortKey}__${req.subject}`;
+    // CORRECCIÓN: teoriaKey incluye grupo para que Lab G1 no bloquee Lab G3
+    const teoriaKey = `${cohortKey}__${req.subject}__${req.grupo}`;
     const { day, hi, room } = best;
     const block = HOURS.slice(hi, hi + req.hoursBlock);
-
-    // ── Req 2: MARCAR GRUPOS INDIVIDUALES en cohortOccupied ──
     const gruposAfectados = expandirGrupos(req.grupo);
 
     for (let bi = hi; bi < hi + req.hoursBlock; bi++) {
       const h = HOURS[bi];
       roomOccupied[day][h][room.name]      = true;
       teacherOccupied[day][h][req.teacher] = true;
-      // Marcar cada grupo individual afectado
+      // Marcar cada grupo individual → bloquea ESE grupo para CUALQUIER otra materia
       for (const g of gruposAfectados) {
-        const eck = `${req.program}__${req.cohort}__${g}`;
-        cohortOccupied[day][h][eck] = true;
+        cohortOccupied[day][h][`${req.program}__${req.cohort}__${g}`] = true;
       }
     }
 
@@ -487,18 +503,22 @@ function runScheduler(
     }
     roomUsageCount[room.name] = (roomUsageCount[room.name] || 0) + 1;
 
+    // CORRECCIÓN: displayLabel incluye grupo para que la grilla lo muestre
+    // Formato: "Química General [G1-G2]" o "Química General [G1-G2] · Lab A"
+    const grupoTag    = req.grupo ? ` [${req.grupo}]` : "";
+    const subgroupTag = req.subgroup ? ` · ${req.subgroup}` : "";
     assignments.push({
       request: req, day,
       hour:     HOURS[hi],
       hour_end: HOURS[hi + req.hoursBlock] || HOURS[hi + req.hoursBlock - 1],
       room: room.name,
       tipo_espacio: req.type === "Laboratorio" ? "lab" : "teoria",
-      displayLabel: `${req.subject}${req.subgroup ? ` · ${req.subgroup}` : ""}`,
+      displayLabel: `${req.subject}${grupoTag}${subgroupTag}`,
       score: best.score,
     });
   };
 
-  // ── OPT 4: Rip-up and Reroute ─────────────────────────────────────────────
+  // ── Rip-up and Reroute ─────────────────────────────────────────────────────
   const ripupDone   = new Set<string>();
   const reroutedIds = new Set<string>();
   const rerouteQueue: ClassRequest[] = [];
@@ -517,7 +537,6 @@ function runScheduler(
       const evictCK   = `${evictReq.program}__${evictReq.cohort}`;
       const evictGrps = expandirGrupos(evictReq.grupo);
 
-      // FASE 1: liberar mapas temporalmente
       for (let bi = evictHi; bi < evictHi + evictReq.hoursBlock; bi++) {
         const h = HOURS[bi];
         delete roomOccupied[a.day][h][a.room];
@@ -527,19 +546,17 @@ function runScheduler(
         }
       }
 
-      // FASE 2: buscar candidatos
       let cands = findCandidates(req, sortedPool, true,  "hard", false);
       if (!cands.length) cands = findCandidates(req, sortedPool, false, "hard", false);
       if (!cands.length) cands = findCandidates(req, sortedPool, false, "soft", false);
 
       if (cands.length > 0) {
-        // FASE 3a: COMMIT
         assignments.splice(i, 1);
         if (cohortDayHours[evictCK]?.[a.day]) {
           cohortDayHours[evictCK][a.day] = cohortDayHours[evictCK][a.day]
             .filter(idx => idx < evictHi || idx >= evictHi + evictReq.hoursBlock);
         }
-        const evictTeoKey = `${evictCK}__${evictReq.subject}`;
+        const evictTeoKey = `${evictCK}__${evictReq.subject}__${evictReq.grupo}`;
         if (evictReq.type === "Teoría" && teoriaSlots[evictTeoKey]) {
           teoriaSlots[evictTeoKey] = teoriaSlots[evictTeoKey]
             .filter(ts => !(ts.day === a.day && ts.hi === evictHi));
@@ -569,7 +586,6 @@ function runScheduler(
         rerouteQueue.push(evictReq);
         return true;
       } else {
-        // FASE 3b: ROLLBACK
         for (let bi = evictHi; bi < evictHi + evictReq.hoursBlock; bi++) {
           const h = HOURS[bi];
           roomOccupied[a.day][h][a.room]              = true;
@@ -599,7 +615,6 @@ function runScheduler(
     return pool2[0];
   };
 
-  // OPT 1a: sort UNA vez por request, pasado a findCandidates
   const buildSortedPool = (req: ClassRequest): RoomEntry[] | null => {
     let basePool: RoomEntry[];
     if (req.type === "Laboratorio") {
@@ -631,7 +646,6 @@ function runScheduler(
     });
   };
 
-  // ── Loop principal ─────────────────────────────────────────────────────────
   for (const req of sorted) {
     const sortedPool = buildSortedPool(req);
     if (!sortedPool) {
@@ -654,18 +668,17 @@ function runScheduler(
     } else {
       const isCritical = req.hoursBlock >= 3 || !!req.espacioEspecifico;
       if (isCritical && !reroutedIds.has(req.id) && attemptRipup(req, sortedPool)) {
-        // éxito silencioso
+        // éxito
       } else {
         conflicts.push({
           request: req,
-          reason: `No hay cupo para "${req.subject}"${req.subgroup ? ` (${req.subgroup})` : ""}`,
+          reason: `No hay cupo para "${req.subject}"${req.grupo ? ` [${req.grupo}]` : ""}${req.subgroup ? ` (${req.subgroup})` : ""}`,
           type: "hard",
         });
       }
     }
   }
 
-  // Procesar cola de re-enrutados
   for (const req of rerouteQueue) {
     const sortedPool = buildSortedPool(req);
     if (!sortedPool) {
@@ -688,7 +701,6 @@ function runScheduler(
 }
 
 // ── PARSER EXCEL ──────────────────────────────────────────────────────────────
-// Req 1: captura columna "Grupo"; si está vacía, extrae con REGEX del nombre
 function parseExcel(buffer: ArrayBuffer): {requests:ClassRequest[];labAvailability:LabAvailability[];error?:string} {
   try {
     const wb   = XLSX.read(new Uint8Array(buffer), {type:"array"});
@@ -709,16 +721,15 @@ function parseExcel(buffer: ArrayBuffer): {requests:ClassRequest[];labAvailabili
       const horaR = String(row["Horas_Disponibles"]||"").trim();
       const espE  = String(row["Espacio_Especifico"]||"").trim();
 
-      // ── Req 1: LEER GRUPO — columna explícita o REGEX retrocompatible ──
-      // Primero intentar columna "Grupo" explícita
+      // ── COLUMNA "Grupo" explícita (nuevo formato recomendado) ──
       let grupo = String(row["Grupo"]||"").trim();
       if (!grupo) {
-        // ── EXPRESIÓN REGULAR: extrae patrón "G1", "G1-G2", "G3-G4" etc.
-        //    del final del nombre de la asignatura (retrocompatibilidad)
+        // ── REGEX RETROCOMPATIBLE: extrae "G1", "G1-G2", "G3-G4" del final
+        //    del nombre de asignatura p.ej. "Biología Celular G1-G2" → grupo="G1-G2"
         const grupoMatch = subj.match(/\s+(G\d+(?:-G\d+)*)\s*$/i);
         if (grupoMatch) {
           grupo = grupoMatch[1].toUpperCase();
-          // Limpiar el grupo del nombre de la asignatura para evitar duplicados
+          // Limpiar el nombre para que no quede "Biología Celular G1-G2" → "Biología Celular"
           subj = subj.replace(/\s+(G\d+(?:-G\d+)*)\s*$/i, "").trim();
         }
       }
@@ -734,7 +745,7 @@ function parseExcel(buffer: ArrayBuffer): {requests:ClassRequest[];labAvailabili
         id:`req-${i}`, program:prog, cohort:coh,
         cohortNumber: extraerNumeroSemestre(coh),
         subject:subj, type, tipoEspacio, teacher:tchr,
-        grupo,  // ← nuevo campo
+        grupo,
         hoursBlock: isNaN(hrs) ? 2 : Math.min(Math.max(hrs,1),4),
         students: isNaN(stu) ? 30 : stu,
         diasDisponibles: diasDisponibles.length > 0 ? diasDisponibles : undefined,
@@ -793,7 +804,6 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
   const [saving,setSaving]               = useState(false);
   const [savedCount,setSavedCount]       = useState(0);
   const [filterView,setFilterView]       = useState<"all"|"teoria"|"lab">("all");
-  // OPT 3/Req 3: estado para prevenir UI Freeze
   const [calculating,setCalculating]    = useState(false);
 
   const Sty = {
@@ -817,7 +827,6 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
   const handleDrop = (e:React.DragEvent) => { e.preventDefault(); setDragOver(false); const f=e.dataTransfer.files[0]; if(f) processFile(f); };
   const handleFile = (e:React.ChangeEvent<HTMLInputElement>) => { const f=e.target.files?.[0]; if(f) processFile(f); };
 
-  // Req 3 / OPT 5: setTimeout(60ms) deja que React renderice "⏳ Calculando..."
   const generateSchedule = () => {
     setCalculating(true);
     setTimeout(() => {
@@ -836,9 +845,18 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
     if(!session) return; setSaving(true); let count=0;
     try {
       for(let i=0; i<assignments.length; i+=10) {
+        // CORRECCIÓN: el batch incluye grupo como campo separado
+        // y subject ya contiene el grupo en displayLabel para la grilla
         const batch = assignments.slice(i,i+10).map(a=>({
-          program:a.request.program, subject:a.displayLabel, teacher:a.request.teacher,
-          day:a.day, hour:a.hour, hour_end:a.hour_end, room:a.room, tipo_espacio:a.tipo_espacio,
+          program:     a.request.program,
+          subject:     a.displayLabel,      // "Química General [G1-G2] · Lab A"
+          grupo:       a.request.grupo,     // "G1-G2" — campo separado para filtros
+          teacher:     a.request.teacher,
+          day:         a.day,
+          hour:        a.hour,
+          hour_end:    a.hour_end,
+          room:        a.room,
+          tipo_espacio:a.tipo_espacio,
         }));
         const res = await fetch(`${SUPABASE_URL}/rest/v1/reservations`,{
           method:"POST",
@@ -858,7 +876,7 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
   const overrideCount = assignments.filter(a => a.request.espacioEspecifico).length;
   const hardConflicts = conflicts.filter(c => c.type==="hard");
   const sabadoCount   = assignments.filter(a => a.day==="Sábado").length;
-  const sedeSoftCount = assignments.filter(a => a.score <= -500).length; // Req 4: umbral -500
+  const sedeSoftCount = assignments.filter(a => a.score <= -500).length;
   const rerouteCount  = conflicts.filter(c => c.reason.startsWith("[Reroute]")).length;
   const { teoriaPool, labPool } = buildRoomPools(externalSpaces);
 
@@ -870,7 +888,7 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
           <div>
             <div style={{fontSize:16,fontWeight:700,color:T.text,fontFamily:"Montserrat,sans-serif"}}>🤖 AutoScheduler — Motor v5</div>
             <div style={{fontSize:11,color:T.muted,marginTop:3}}>
-              Grupos explícitos · Sede -2000 · Rip-up & Reroute · No UI Freeze
+              Grupos por semestre · Sede -2000 · Rip-up & Reroute · No UI Freeze
               {" · "}<span style={{color:"#4ade80"}}>🏫 {teoriaPool.length} aulas · 🔬 {labPool.length} labs</span>
             </div>
           </div>
@@ -924,7 +942,7 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
                 </div>
                 <div style={{background:T.bg2,borderRadius:10,padding:16,border:`1px solid rgba(74,222,128,0.2)`}}>
                   <div style={{fontSize:12,fontWeight:700,color:"#4ade80",marginBottom:10,textTransform:"uppercase" as const}}>✨ Columnas opcionales</div>
-                  {[["Grupo","G1 · G1-G2 · G3-G4 (nuevo, recomendado)"],
+                  {[["Grupo","G1 · G1-G2 · G3-G4 (recomendado)"],
                     ["Dias_Disponibles","Lunes, Miércoles"],["Horas_Disponibles","08:00-12:00"],
                     ["Espacio_Especifico","Lab 1 Qca · 1001"]].map(([c,d])=>(
                     <div key={c} style={{display:"flex",gap:8,marginBottom:4,fontSize:11}}>
@@ -932,7 +950,13 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
                       <span style={{color:T.muted}}>{d}</span>
                     </div>
                   ))}
-                  <div style={{marginTop:12,fontSize:12,fontWeight:700,color:"#fb923c",marginBottom:8,textTransform:"uppercase" as const}}>📋 Hoja "Disponibilidad_Labs"</div>
+                  <div style={{marginTop:10,padding:"8px 10px",borderRadius:8,background:"rgba(167,139,250,0.08)",border:"1px solid rgba(167,139,250,0.2)",fontSize:11,color:"#c4b5fd"}}>
+                    💡 <b>Regla de solapamiento:</b><br/>
+                    ✅ Química G1-G2 (Prof A) ↔ Química G3-G4 (Prof B) — ok<br/>
+                    ❌ Química G1-G2 ↔ Matemáticas G1-G2 — bloqueado<br/>
+                    ❌ Mismo docente en dos aulas — bloqueado
+                  </div>
+                  <div style={{marginTop:10,fontSize:12,fontWeight:700,color:"#fb923c",marginBottom:6,textTransform:"uppercase" as const}}>📋 Hoja "Disponibilidad_Labs"</div>
                   {[["Lab","Lab 1 Bio"],["Programa","Biología"],["Dia","Lunes"],["Desde","06:00"],["Hasta","14:00"]].map(([c,d])=>(
                     <div key={c} style={{display:"flex",gap:8,marginBottom:4,fontSize:11}}>
                       <span style={{color:"#fb923c",fontWeight:600,minWidth:80,flexShrink:0}}>{c}</span>
@@ -1003,7 +1027,6 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
               </div>
               <div style={{display:"flex",gap:10}}>
                 <button onClick={()=>setStep("upload")} style={{...Sty.btn(T.bg),border:`1px solid ${T.border2}`,color:T.mutedL}}>← Volver</button>
-                {/* Req 3: botón muestra "⏳ Calculando..." mientras corre el motor */}
                 <button
                   onClick={generateSchedule}
                   disabled={calculating}
@@ -1052,11 +1075,11 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
 
               {filtered.length>0&&(
                 <div style={{background:T.bg2,borderRadius:10,border:`1px solid ${T.border}`,overflow:"hidden"}}>
-                  <div style={{overflowX:"auto" as const,maxHeight:360,overflowY:"auto" as const}}>
+                  <div style={{overflowX:"auto" as const,maxHeight:400,overflowY:"auto" as const}}>
                     <table style={{borderCollapse:"collapse" as const,width:"100%",fontSize:12}}>
                       <thead style={{position:"sticky" as const,top:0,zIndex:1}}>
                         <tr style={{background:T.bg3}}>
-                          {["Tipo","Programa","Asignatura","Grupo","Subgrupo","Docente","Día","Horario","Espacio","Est.","Score"].map(h=>(
+                          {["Tipo","Programa","Asignatura","Grupo","Split","Docente","Día","Horario","Espacio","Est.","Score"].map(h=>(
                             <th key={h} style={{padding:"8px 10px",color:T.muted,fontWeight:600,textAlign:"left" as const,whiteSpace:"nowrap" as const,borderBottom:`1px solid ${T.border}`}}>{h}</th>
                           ))}
                         </tr>
@@ -1069,7 +1092,6 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
                           const isSplit    = !!a.request.parentId;
                           const isOverride = !!a.request.espacioEspecifico;
                           const isSabado   = a.day==="Sábado";
-                          // Req 4: score < -500 = conflicto forzado
                           const isConflictoForzado = a.score < -500;
                           const scoreColor = isConflictoForzado ? "#f87171" : a.score > 0 ? "#4ade80" : "#fb923c";
                           return(
@@ -1082,13 +1104,16 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
                                 </span>
                               </td>
                               <td style={{padding:"7px 10px",color}}><span style={{display:"flex",alignItems:"center",gap:4}}><span>{icon}</span>{a.request.program}</span></td>
-                              <td style={{padding:"7px 10px",color:T.text,maxWidth:130,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" as const}} title={a.request.subject}>{a.request.subject}</td>
+                              <td style={{padding:"7px 10px",color:T.text,maxWidth:140,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" as const}} title={a.request.subject}>{a.request.subject}</td>
+                              {/* COLUMNA GRUPO — visible en grilla y coincide con lo guardado en BD */}
                               <td style={{padding:"7px 10px"}}>
-                                {a.request.grupo?(
-                                  <span style={{fontSize:10,padding:"2px 8px",borderRadius:99,background:"rgba(167,139,250,0.15)",color:"#a78bfa",fontWeight:600}}>
-                                    {a.request.grupo}
+                                {a.request.grupo ? (
+                                  <span style={{fontSize:10,padding:"2px 8px",borderRadius:99,
+                                    background:"rgba(167,139,250,0.15)",color:"#a78bfa",fontWeight:700,
+                                    whiteSpace:"nowrap" as const}}>
+                                    👥 {a.request.grupo}
                                   </span>
-                                ):<span style={{color:T.muted,fontSize:11}}>—</span>}
+                                ) : <span style={{color:T.muted,fontSize:11}}>—</span>}
                               </td>
                               <td style={{padding:"7px 10px"}}>
                                 {a.request.subgroup?(
@@ -1099,7 +1124,7 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
                                   </span>
                                 ):<span style={{color:T.muted,fontSize:11}}>—</span>}
                               </td>
-                              <td style={{padding:"7px 10px",color:T.mutedL,whiteSpace:"nowrap" as const}}>{a.request.teacher}</td>
+                              <td style={{padding:"7px 10px",color:T.mutedL,whiteSpace:"nowrap" as const,maxWidth:120,overflow:"hidden",textOverflow:"ellipsis"}} title={a.request.teacher}>{a.request.teacher}</td>
                               <td style={{padding:"7px 10px"}}>
                                 <span style={{color:isSabado?"#94a3b8":T.mutedL,fontWeight:isSabado?600:400}}>
                                   {isSabado?"📅 ":""}{a.day}
@@ -1112,7 +1137,6 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
                                 </span>
                               </td>
                               <td style={{padding:"7px 10px",color:T.muted,textAlign:"center" as const}}>{a.request.students}</td>
-                              {/* Req 4: score redondeado 2 decimales; rojo + ⚠️ si < -500 */}
                               <td style={{padding:"7px 10px",color:scoreColor,fontFamily:"monospace",fontWeight:600,textAlign:"center" as const}}>
                                 {isConflictoForzado?"⚠️ ":""}{a.score>0?"+":""}{a.score.toFixed(2)}
                               </td>
@@ -1132,11 +1156,12 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
                     <div key={i} style={{background:"rgba(239,68,68,0.07)",border:"1px solid rgba(239,68,68,0.2)",borderRadius:8,padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,marginBottom:6}}>
                       <div>
                         <div style={{fontSize:12,fontWeight:600,color:"#fca5a5",marginBottom:2}}>
-                          {PROG_ICONS[c.request.program]} {c.request.subject}{c.request.subgroup?` (${c.request.subgroup})`:""} — {c.request.teacher}
+                          {PROG_ICONS[c.request.program]} {c.request.subject}
+                          {c.request.grupo&&<span style={{color:"#a78bfa",marginLeft:4}}>[{c.request.grupo}]</span>}
+                          {c.request.subgroup&&` (${c.request.subgroup})`} — {c.request.teacher}
                         </div>
                         <div style={{fontSize:11,color:T.muted}}>
                           {c.request.program} · {c.request.cohort} · {c.request.type} · {c.request.hoursBlock}h
-                          {c.request.grupo&&<span style={{color:"#a78bfa",marginLeft:6}}>👥 {c.request.grupo}</span>}
                           {c.request.espacioEspecifico&&<span style={{color:"#fb923c",marginLeft:6}}>📌 {c.request.espacioEspecifico}</span>}
                         </div>
                       </div>
@@ -1165,13 +1190,13 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
               <div style={{fontSize:64,marginBottom:20}}>🎉</div>
               <div style={{fontSize:22,fontWeight:800,color:T.text,fontFamily:"Montserrat,sans-serif",marginBottom:8}}>¡Horario generado con éxito!</div>
               <div style={{fontSize:14,color:T.muted,marginBottom:32,lineHeight:1.8}}>
-                <span style={{color:"#4ade80",fontWeight:700}}>{savedCount} reservas</span> guardadas.
-                {splitCount>0&&<><br/><span style={{color:"#fb923c"}}>{splitCount} subgrupos</span> por capacidad.</>}
+                <span style={{color:"#4ade80",fontWeight:700}}>{savedCount} reservas</span> guardadas con grupo incluido.
+                {splitCount>0&&<><br/><span style={{color:"#fb923c"}}>{splitCount} subgrupos</span> por capacidad de laboratorio.</>}
                 {overrideCount>0&&<><br/><span style={{color:"#fb923c"}}>{overrideCount} clases</span> con espacio específico.</>}
                 {sabadoCount>0&&<><br/><span style={{color:"#94a3b8"}}>{sabadoCount} clases</span> asignadas en sábado.</>}
                 {sedeSoftCount>0&&<><br/><span style={{color:"#f87171"}}>{sedeSoftCount} clases</span> con conflicto de sede forzado.</>}
                 {rerouteCount>0&&<><br/><span style={{color:"#a78bfa"}}>{rerouteCount} clases</span> reubicadas por Rip-up & Reroute.</>}
-                {hardConflicts.length>0&&<><br/><span style={{color:"#f87171"}}>{hardConflicts.length} clases</span> sin espacio.</>}
+                {hardConflicts.length>0&&<><br/><span style={{color:"#f87171"}}>{hardConflicts.length} clases</span> sin espacio disponible.</>}
               </div>
               <div style={{display:"flex",gap:10,justifyContent:"center"}}>
                 <button
