@@ -165,7 +165,7 @@ function buildRoomPools(externalSpaces?: any[]): { teoriaPool: RoomEntry[]; labP
 function runScheduler(
   rawRequests: ClassRequest[], programConfig: ProgramConfig[],
   labAvailability: LabAvailability[], externalSpaces?: any[],
-): { assignments: Assignment[]; conflicts: Conflict[] } 
+): { assignments: Assignment[]; conflicts: Conflict[] } {
   const assignments: Assignment[] = [];
   const conflicts:   Conflict[]   = [];
 
@@ -962,4 +962,4 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
       </div>
     </div>
   );
-}
+          }}
