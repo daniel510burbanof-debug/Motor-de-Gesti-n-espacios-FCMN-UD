@@ -239,6 +239,31 @@ function runScheduler(
       if (yaUsado) score += 8;
     }
     if (block[0] < "12:00") score += 3;
+
+    // Bonus fuerte por adyacencia inmediata con otra clase del mismo semestre
+    const ck = `${req.program}__${req.cohort}`;
+    const existentesHoy = cohortDayHours[ck]?.[day] || [];
+    if (existentesHoy.length > 0) {
+      const startIdx = getHourIndex(block[0]);
+      const endIdx   = startIdx + req.hoursBlock - 1;
+      const pegadoDespues = existentesHoy.includes(startIdx - 1);
+      const pegadoAntes   = existentesHoy.includes(endIdx + 1);
+      if (pegadoDespues || pegadoAntes) score += 25;
+    }
+
+    // Si es sede relajada: exigir al menos 1h de margen con teoría del mismo semestre
+    if (sedeViolation) {
+      const ckBase = `${req.program}__${req.cohort}`;
+      const tipoOpuesto = req.type === "Laboratorio" ? "teoria" : "lab";
+      const horasOpuestas = assignments
+        .filter(a => a.day === day && a.tipo_espacio === tipoOpuesto &&
+          `${a.request.program}__${a.request.cohort}` === ckBase)
+        .flatMap(a => getBlock(a.hour, a.request.hoursBlock));
+      const demasiadoCerca = horasOpuestas.some(th =>
+        block.some(bh => Math.abs(getHourIndex(bh) - getHourIndex(th)) <= 1)
+      );
+      if (demasiadoCerca) score -= 999;
+    }
     if (room.capacity - req.students > 30) score -= 2;
     score -= (roomUsageCount[room.name] || 0) * 3;
     if (req.parentId) {
