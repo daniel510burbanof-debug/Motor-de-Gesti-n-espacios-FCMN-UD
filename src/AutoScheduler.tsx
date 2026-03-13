@@ -157,6 +157,15 @@ function buildRoomPools(externalSpaces?: any[]): { teoriaPool: RoomEntry[]; labP
   };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// MOTOR v5 — OPTIMIZADO (5 niveles)
+// OPT 1a: Pool ordenado una vez fuera de findCandidates
+// OPT 1b: Bucles con índices numéricos puros, strings solo al guardar
+// OPT 2:  Índices en SlotMap y teoriaSlots (evitar HOURS.indexOf en hot path)
+// OPT 3:  Desempate estocástico en softScore
+// OPT 4:  Rip-up and Reroute two-phase (sin bucles infinitos)
+// OPT 5:  generateSchedule async con estado "Calculando..." (ver componente)
+// ─────────────────────────────────────────────────────────────────────────────
 function runScheduler(
   rawRequests: ClassRequest[], programConfig: ProgramConfig[],
   labAvailability: LabAvailability[], externalSpaces?: any[],
@@ -168,6 +177,10 @@ function runScheduler(
   const maxLabCap = labPool.length > 0 ? Math.min(...labPool.map(r => r.capacity)) : CAPACIDAD_MAX_LAB;
   const requests  = splitLabRequests(rawRequests, maxLabCap);
 
+  // ── Mapas de ocupación ──────────────────────────────────────────────────────
+  // OPT 1b: Indexamos horas como number (0–13) en cohortDayHours/teoriaSlots
+  //         Los SlotMap siguen usando string como key para compatibilidad con
+  //         teacherBreak/roomOccupied que se inicializan con HOURS string keys
   type SlotMap = Record<string, Record<string, Record<string, boolean>>>;
   const roomOccupied:         SlotMap = {};
   const teacherOccupied:      SlotMap = {};
@@ -177,7 +190,8 @@ function runScheduler(
   const programDaySemesters:  Record<string, Set<number>> = {};
   const parentAssignedSlots:  Record<string, Array<{day:string; hours:string[]}>> = {};
   const parentRoomPreference: Record<string, string> = {};
-  const teoriaSlots:          Record<string, Array<{day:string; hours:string[]}>> = {};
+  // OPT 1b: teoriaSlots ahora guarda índices numéricos en lugar de string arrays
+  const teoriaSlots:          Record<string, Array<{day:string; hi:number; len:number}>> = {};
   const roomUsageCount:       Record<string, number> = {};
 
   DAYS.forEach(d => {
@@ -190,15 +204,14 @@ function runScheduler(
   });
   [...teoriaPool, ...labPool].forEach(r => { roomUsageCount[r.name] = 0; });
 
+  // ── Ordenamiento y prioridad ────────────────────────────────────────────────
   const difficultyScore = (r: ClassRequest): number => {
-    let score = 0;
-    score += r.hoursBlock * 150;
-    if (r.diasDisponibles && r.diasDisponibles.length > 0)
-      score += (6 - r.diasDisponibles.length) * 80;
-    if (r.espacioEspecifico) score += 300;
-    if (r.type === "Laboratorio") score += 50;
-    score += r.students;
-    return score;
+    let s = r.hoursBlock * 150;
+    if (r.diasDisponibles?.length) s += (6 - r.diasDisponibles.length) * 80;
+    if (r.espacioEspecifico) s += 300;
+    if (r.type === "Laboratorio") s += 50;
+    s += r.students;
+    return s;
   };
 
   const cohortOrder = new Map<string, number>();
@@ -208,16 +221,18 @@ function runScheduler(
     if (!cohortOrder.has(key)) cohortOrder.set(key, cohortIdx++);
   }
   const sorted = [...requests].sort((a, b) => {
-    const ckA = `${a.program}__${a.cohort}`;
-    const ckB = `${b.program}__${b.cohort}`;
-    const cohortDiff = (cohortOrder.get(ckA) ?? 0) - (cohortOrder.get(ckB) ?? 0);
-    if (cohortDiff !== 0) return cohortDiff;
-    return difficultyScore(b) - difficultyScore(a);
+    const diff = (cohortOrder.get(`${a.program}__${a.cohort}`) ?? 0)
+               - (cohortOrder.get(`${b.program}__${b.cohort}`) ?? 0);
+    return diff !== 0 ? diff : difficultyScore(b) - difficultyScore(a);
   });
 
+  // ── softScore ───────────────────────────────────────────────────────────────
+  // OPT 1b: recibe hi (índice numérico) en lugar de block (string[])
+  // OPT 3:  desempate estocástico al final
   const softScore = (
     req: ClassRequest, day: string,
-    block: string[], room: RoomEntry,
+    hi: number,            // OPT 1b: índice numérico de inicio
+    room: RoomEntry,
     sedeViolation: boolean,
   ): number => {
     let score = 0;
@@ -228,30 +243,36 @@ function runScheduler(
     if (semsEnDia.has(req.cohortNumber - 1) || semsEnDia.has(req.cohortNumber + 1))
       score -= 10; else score += 5;
 
-    if (block[0] < "12:00") score += 3;
+    // OPT 1b: comparación de índice en lugar de string "12:00"
+    if (hi < 6) score += 3; // índice 6 = "12:00"
 
-    // Bonus fuerte por adyacencia back-to-back
     const ck = `${req.program}__${req.cohort}`;
     const existentesHoy = cohortDayHours[ck]?.[day] || [];
     if (existentesHoy.length > 0) {
-      const startIdx = getHourIndex(block[0]);
-      const endIdx   = startIdx + req.hoursBlock - 1;
-      const pegadoDespues = existentesHoy.some(idx => idx === startIdx - 1);
-      const pegadoAntes   = existentesHoy.some(idx => idx === endIdx + 1);
+      const ei = hi + req.hoursBlock - 1;
+      const pegadoDespues = existentesHoy.some(idx => idx === hi - 1);
+      const pegadoAntes   = existentesHoy.some(idx => idx === ei + 1);
       if (pegadoDespues || pegadoAntes) score += 50;
-      const hayHueco1h = existentesHoy.some(idx => idx === startIdx - 2 || idx === endIdx + 2);
+      const hayHueco1h = existentesHoy.some(idx => idx === hi - 2 || idx === ei + 2);
       if (hayHueco1h && !pegadoDespues && !pegadoAntes) score -= 20;
     }
 
-    // Sede relajada: mínimo 1h de margen con tipo opuesto del mismo semestre
     if (sedeViolation) {
       const tipoOpuesto = req.type === "Laboratorio" ? "teoria" : "lab";
-      const horasOpuestas = assignments
-        .filter(a => a.day === day && a.tipo_espacio === tipoOpuesto &&
-          `${a.request.program}__${a.request.cohort}` === ck)
-        .flatMap(a => getBlock(a.hour, a.request.hoursBlock));
-      const demasiadoCerca = horasOpuestas.some(th =>
-        block.some(bh => Math.abs(getHourIndex(bh) - getHourIndex(th)) <= 1)
+      // OPT 1b: construimos índices en lugar de strings para comparar proximidad
+      const horasOpuestasIdx = assignments
+        .filter(a =>
+          a.day === day &&
+          a.tipo_espacio === tipoOpuesto &&
+          `${a.request.program}__${a.request.cohort}` === ck
+        )
+        .flatMap(a => {
+          const ai = getHourIndex(a.hour);
+          return Array.from({ length: a.request.hoursBlock }, (_, k) => ai + k);
+        });
+      const ei = hi + req.hoursBlock - 1;
+      const demasiadoCerca = horasOpuestasIdx.some(th =>
+        Math.abs(th - hi) <= 1 || Math.abs(th - ei) <= 1
       );
       if (demasiadoCerca) score -= 999;
     }
@@ -262,21 +283,28 @@ function runScheduler(
     if (req.parentId) {
       const pref = parentRoomPreference[req.parentId];
       if (pref && pref !== room.name) score -= 5;
-      // Bonus extra por subgrupos back-to-back en misma sala
       const pSlots = parentAssignedSlots[req.parentId] || [];
       const sgAdyacente = pSlots.some(ps => {
         if (ps.day !== day) return false;
         const lastIdx = getHourIndex(ps.hours[ps.hours.length - 1]);
-        return HOURS[lastIdx + 1] === block[0];
+        return lastIdx + 1 === hi;
       });
       if (sgAdyacente) score += 30;
     }
 
+    // OPT 3: Desempate estocástico — nudge aleatorio pequeño para evitar
+    //         sesgos estructurales (e.g. siempre llena "1001" antes que "1004")
+    score += Math.random() * 0.5;
+
     return score;
   };
 
+  // ── findCandidates ──────────────────────────────────────────────────────────
+  // OPT 1a: recibe sortedPool ya ordenado (no hace sort interno)
+  // OPT 1b: todo el hot path usa índices numéricos; strings solo para lookups de SlotMap
   const findCandidates = (
-    req: ClassRequest, pool: RoomEntry[],
+    req: ClassRequest,
+    sortedPool: RoomEntry[],       // OPT 1a: pre-sorted, passed from outside
     respectarGap: boolean,
     sedeModo: "hard"|"soft"|"off",
     includeSabado: boolean,
@@ -288,24 +316,19 @@ function runScheduler(
     const teoriaKey   = `${cohortKey}__${req.subject}`;
     const parentSlots = req.parentId ? (parentAssignedSlots[req.parentId] || []) : [];
     const teoriaOcup  = teoriaSlots[teoriaKey] || [];
-    const preferredRoom = req.parentId ? parentRoomPreference[req.parentId] : undefined;
 
-    const sortedPool = [...pool].sort((a, b) => {
-      if (preferredRoom && !req.espacioEspecifico) {
-        if (a.name === preferredRoom) return -1;
-        if (b.name === preferredRoom) return 1;
-      }
-      return (a.capacity - req.students) - (b.capacity - req.students);
-    });
+    // OPT 1b: convertir hora constraints a índices una sola vez, fuera de los loops
+    const hiDesde = req.horaDesde ? getHourIndex(req.horaDesde) : 0;
+    const hiHasta = req.horaHasta ? getHourIndex(req.horaHasta) : HOURS.length - 1;
 
     let diasBase: string[];
-    if (req.diasDisponibles && req.diasDisponibles.length > 0) {
+    if (req.diasDisponibles?.length) {
       diasBase = req.diasDisponibles.filter(d => includeSabado ? true : d !== "Sábado");
     } else {
       diasBase = includeSabado ? DAYS : DAYS_SIN_SABADO;
     }
 
-    const candidates: Array<{ day:string; hour:string; block:string[]; room:RoomEntry; score:number }> = [];
+    const candidates: Array<{ day:string; hi:number; room:RoomEntry; score:number }> = [];
 
     for (const day of diasBase) {
       const existeLab    = assignments.some(a => a.day === day && a.tipo_espacio === "lab"    && `${a.request.program}__${a.request.cohort}` === cohortKey);
@@ -313,48 +336,72 @@ function runScheduler(
       const sedeConflicto = (req.type === "Laboratorio" && existeTeoria) || (req.type === "Teoría" && existeLab);
       if (sedeModo === "hard" && sedeConflicto) continue;
 
-      for (let hi = 0; hi <= HOURS.length - req.hoursBlock; hi++) {
-        const start = HOURS[hi];
-        const block = getBlock(start, req.hoursBlock);
-        if (block.length < req.hoursBlock) continue;
+      const maxHi = HOURS.length - req.hoursBlock;
+      for (let hi = 0; hi <= maxHi; hi++) { // OPT 1b: loop numérico puro
+        // OPT 1b: constraints horarias como índices (sin string compare)
+        if (hi < hiDesde) continue;
+        if (hi + req.hoursBlock - 1 > hiHasta) continue;
 
-        if (req.horaDesde && req.horaHasta) {
-          if (start < req.horaDesde || block[block.length - 1] > req.horaHasta) continue;
+        // OPT 1b: verificar teacher/cohort con loop de índices — evita getBlock + .some
+        let slotBlocked = false;
+        for (let bi = hi; bi < hi + req.hoursBlock; bi++) {
+          const h = HOURS[bi];
+          if (
+            teacherBreak[day][h]?.[req.teacher] ||
+            teacherOccupied[day][h]?.[req.teacher] ||
+            cohortOccupied[day][h]?.[effectiveCohortKey]
+          ) { slotBlocked = true; break; }
         }
-        if (block.some(h => teacherBreak[day][h]?.[req.teacher]))              continue;
-        if (block.some(h => teacherOccupied[day][h]?.[req.teacher]))           continue;
-        if (block.some(h => cohortOccupied[day][h]?.[effectiveCohortKey]))     continue;
+        if (slotBlocked) continue;
 
-        if (req.parentId) {
-          const choca = parentSlots.some(ps => ps.day === day && ps.hours.some(h => block.includes(h)));
-          if (choca) continue;
+        // parentSlots: poco frecuente, OK con strings
+        if (req.parentId && parentSlots.length > 0) {
+          const blockStr = HOURS.slice(hi, hi + req.hoursBlock);
+          if (parentSlots.some(ps => ps.day === day && ps.hours.some(h => blockStr.includes(h)))) continue;
         }
-        if (req.type === "Laboratorio") {
-          const cruza = teoriaOcup.some(ts => ts.day === day && ts.hours.some(h => block.includes(h)));
+
+        // OPT 1b: teoriaOcup ahora guarda {hi, len} — comparación numérica directa
+        if (req.type === "Laboratorio" && teoriaOcup.length > 0) {
+          let cruza = false;
+          for (const ts of teoriaOcup) {
+            if (ts.day !== day) continue;
+            for (let bi = hi; bi < hi + req.hoursBlock; bi++) {
+              if (bi >= ts.hi && bi < ts.hi + ts.len) { cruza = true; break; }
+            }
+            if (cruza) break;
+          }
           if (cruza) continue;
         }
+
+        // Gap constraint
         if (respectarGap) {
           const cfg    = programConfig.find(p => p.program === req.program);
           const maxGap = cfg?.maxGapHours ?? 999;
           if (maxGap < 999) {
             const existentes = cohortDayHours[cohortKey]?.[day] || [];
             if (existentes.length > 0) {
-              const startIdx   = getHourIndex(start);
-              const minExist   = Math.min(...existentes);
-              const maxExist   = Math.max(...existentes);
-              const gapAntes   = startIdx - maxExist - 1;
-              const gapDespues = minExist - (startIdx + req.hoursBlock);
-              if (gapAntes   > maxGap) continue;
-              if (gapDespues > 0 && gapDespues > maxGap) continue;
+              const minE = Math.min(...existentes);
+              const maxE = Math.max(...existentes);
+              if (hi - maxE - 1 > maxGap) continue;
+              const gapD = minE - (hi + req.hoursBlock);
+              if (gapD > 0 && gapD > maxGap) continue;
             }
           }
         }
 
         for (const room of sortedPool) {
-          if (block.some(h => roomOccupied[day][h]?.[room.name])) continue;
+          // OPT 1b: room occupancy con loop de índices
+          let roomBlocked = false;
+          for (let bi = hi; bi < hi + req.hoursBlock; bi++) {
+            if (roomOccupied[day][HOURS[bi]]?.[room.name]) { roomBlocked = true; break; }
+          }
+          if (roomBlocked) continue;
+
           if (!req.espacioEspecifico && req.type !== "Laboratorio") {
             if (room.subtipo !== req.tipoEspacio) continue;
           }
+
+          // Hora apertura/cierre con índices
           if (externalSpaces) {
             const ext = externalSpaces.find((s: any) => s.nombre === room.name);
             if (ext) {
@@ -365,45 +412,67 @@ function runScheduler(
               };
               const apertura = normT(ext.hora_apertura) || "06:00";
               const cierre   = normT(ext.hora_cierre)   || "19:00";
-              if (block.some(h => h < apertura || h >= cierre)) continue;
+              let fuera = false;
+              for (let bi = hi; bi < hi + req.hoursBlock; bi++) {
+                if (HOURS[bi] < apertura || HOURS[bi] >= cierre) { fuera = true; break; }
+              }
+              if (fuera) continue;
             }
           }
+
+          // Ventanas de lab
           if (req.type === "Laboratorio" && labAvailability.length > 0) {
             const progTieneVentanas = labAvailability.some(la => la.program === req.program);
             if (progTieneVentanas) {
-              const ventanas = labAvailability.filter(la => la.lab === room.name && la.program === req.program && la.day === day);
+              const ventanas = labAvailability.filter(la =>
+                la.lab === room.name && la.program === req.program && la.day === day
+              );
               if (ventanas.length === 0) continue;
-              const dentro = ventanas.some(v => block.every(h => h >= v.from && h < v.to));
+              const dentro = ventanas.some(v => {
+                for (let bi = hi; bi < hi + req.hoursBlock; bi++) {
+                  if (HOURS[bi] < v.from || HOURS[bi] >= v.to) return false;
+                }
+                return true;
+              });
               if (!dentro) continue;
             }
           }
+
           const sedeViolation = sedeModo === "soft" && sedeConflicto;
-          candidates.push({ day, hour: start, block, room, score: softScore(req, day, block, room, sedeViolation) });
+          // OPT 1b: guardamos hi numérico en el candidato
+          candidates.push({ day, hi, room, score: softScore(req, day, hi, room, sedeViolation) });
         }
       }
     }
     return candidates;
   };
 
+  // ── confirmarAsignacion ─────────────────────────────────────────────────────
+  // OPT 1b: recibe hi numérico, convierte a strings solo al guardar en Assignment
   const confirmarAsignacion = (
     req: ClassRequest,
-    best: { day:string; hour:string; block:string[]; room:RoomEntry; score:number },
+    best: { day:string; hi:number; room:RoomEntry; score:number },
   ) => {
     const cohortKey = `${req.program}__${req.cohort}`;
     const effectiveCohortKey = (req.type === "Laboratorio" && req.subgroup)
       ? `${req.program}__${req.cohort}__${req.subgroup}`
       : cohortKey;
     const teoriaKey = `${cohortKey}__${req.subject}`;
-    const { day, hour: start, block, room } = best;
+    const { day, hi, room } = best;
+    // OPT 1b: strings solo aquí, al momento de persistir
+    const startStr = HOURS[hi];
+    const block    = HOURS.slice(hi, hi + req.hoursBlock);
 
-    block.forEach(h => {
+    for (let bi = hi; bi < hi + req.hoursBlock; bi++) {
+      const h = HOURS[bi];
       roomOccupied[day][h][room.name]            = true;
       teacherOccupied[day][h][req.teacher]       = true;
       cohortOccupied[day][h][effectiveCohortKey] = true;
-    });
+    }
     if (!cohortDayHours[cohortKey])      cohortDayHours[cohortKey] = {};
     if (!cohortDayHours[cohortKey][day]) cohortDayHours[cohortKey][day] = [];
-    block.forEach(h => cohortDayHours[cohortKey][day].push(getHourIndex(h)));
+    // OPT 1b: guardamos índices numéricos en cohortDayHours
+    for (let bi = hi; bi < hi + req.hoursBlock; bi++) cohortDayHours[cohortKey][day].push(bi);
 
     const pdKey = `${req.program}|${day}`;
     if (!programDaySemesters[pdKey]) programDaySemesters[pdKey] = new Set();
@@ -411,7 +480,8 @@ function runScheduler(
 
     if (req.type === "Teoría") {
       if (!teoriaSlots[teoriaKey]) teoriaSlots[teoriaKey] = [];
-      teoriaSlots[teoriaKey].push({ day, hours: block });
+      // OPT 1b: teoriaSlots guarda {hi, len} numéricos
+      teoriaSlots[teoriaKey].push({ day, hi, len: req.hoursBlock });
     }
     if (req.parentId) {
       if (!parentAssignedSlots[req.parentId]) parentAssignedSlots[req.parentId] = [];
@@ -419,15 +489,17 @@ function runScheduler(
       if (!parentRoomPreference[req.parentId]) parentRoomPreference[req.parentId] = room.name;
     }
     if (req.hoursBlock >= 4) {
-      const bi = getHourIndex(start) + req.hoursBlock;
+      const bi = hi + req.hoursBlock;
       if (bi < HOURS.length) teacherBreak[day][HOURS[bi]][req.teacher] = true;
     }
     roomUsageCount[room.name] = (roomUsageCount[room.name] || 0) + 1;
 
     const subgroupLabel = req.subgroup ? ` · ${req.subgroup}` : "";
     assignments.push({
-      request: req, day, hour: start,
-      hour_end: HOURS[getHourIndex(block[block.length - 1]) + 1] || block[block.length - 1],
+      request: req, day,
+      hour:     startStr,
+      // OPT 1b: hour_end = índice siguiente = end exclusivo correcto para el grid
+      hour_end: HOURS[hi + req.hoursBlock] || HOURS[hi + req.hoursBlock - 1],
       room: room.name,
       tipo_espacio: req.type === "Laboratorio" ? "lab" : "teoria",
       displayLabel: `${req.subject}${subgroupLabel}`,
@@ -435,63 +507,200 @@ function runScheduler(
     });
   };
 
-  for (const req of sorted) {
-    let basePool: RoomEntry[] = [];
+  // ── OPT 4: Rip-up and Reroute ───────────────────────────────────────────────
+  // Garantías anti-bucle infinito:
+  //   1. ripupDone: cada req.id dispara rip-up como máximo UNA VEZ
+  //   2. reroutedIds: clases ya desalojadas NO pueden desalojar a nadie más
+  //   3. Solo desaloja si evictee.hoursBlock < req.hoursBlock (jerarquía estricta)
+  //   4. Two-phase commit: libera mapas temporalmente → verifica → restaura si falla
+  const ripupDone   = new Set<string>();
+  const reroutedIds = new Set<string>();
+  const rerouteQueue: ClassRequest[] = [];
+
+  const attemptRipup = (req: ClassRequest, sortedPool: RoomEntry[]): boolean => {
+    if (ripupDone.has(req.id)) return false; // garantía 1
+    ripupDone.add(req.id);
+
+    for (let i = 0; i < assignments.length; i++) {
+      const a = assignments[i];
+      if (a.request.hoursBlock >= req.hoursBlock) continue; // garantía 3
+      if (reroutedIds.has(a.request.id)) continue;          // garantía 2
+
+      const evictReq = a.request;
+      const evictHi  = getHourIndex(a.hour);
+      const evictCK  = `${evictReq.program}__${evictReq.cohort}`;
+      const evictECK = (evictReq.type === "Laboratorio" && evictReq.subgroup)
+        ? `${evictReq.program}__${evictReq.cohort}__${evictReq.subgroup}`
+        : evictCK;
+
+      // FASE 1: liberar temporalmente solo los mapas de ocupación (no assignments[])
+      for (let bi = evictHi; bi < evictHi + evictReq.hoursBlock; bi++) {
+        const h = HOURS[bi];
+        delete roomOccupied[a.day][h][a.room];
+        delete teacherOccupied[a.day][h][evictReq.teacher];
+        delete cohortOccupied[a.day][h][evictECK];
+      }
+
+      // FASE 2: buscar candidatos para la clase crítica
+      let cands = findCandidates(req, sortedPool, true,  "hard", false);
+      if (!cands.length) cands = findCandidates(req, sortedPool, false, "hard", false);
+      if (!cands.length) cands = findCandidates(req, sortedPool, false, "soft", false);
+
+      if (cands.length > 0) {
+        // FASE 3a: COMMIT — remover evictee de todas las estructuras de datos
+        assignments.splice(i, 1);
+        if (cohortDayHours[evictCK]?.[a.day]) {
+          cohortDayHours[evictCK][a.day] = cohortDayHours[evictCK][a.day]
+            .filter(idx => idx < evictHi || idx >= evictHi + evictReq.hoursBlock);
+        }
+        const evictTeoKey = `${evictCK}__${evictReq.subject}`;
+        if (evictReq.type === "Teoría" && teoriaSlots[evictTeoKey]) {
+          teoriaSlots[evictTeoKey] = teoriaSlots[evictTeoKey]
+            .filter(ts => !(ts.day === a.day && ts.hi === evictHi));
+        }
+        if (evictReq.parentId && parentAssignedSlots[evictReq.parentId]) {
+          parentAssignedSlots[evictReq.parentId] = parentAssignedSlots[evictReq.parentId]
+            .filter(ps => !(ps.day === a.day && ps.hours[0] === a.hour));
+        }
+        if (evictReq.hoursBlock >= 4) {
+          const bi = evictHi + evictReq.hoursBlock;
+          if (bi < HOURS.length) delete teacherBreak[a.day][HOURS[bi]][evictReq.teacher];
+        }
+        roomUsageCount[a.room] = Math.max(0, (roomUsageCount[a.room] || 1) - 1);
+
+        // Asignar la clase crítica
+        const ck = `${req.program}__${req.cohort}`;
+        const adj = cands.filter(c => {
+          const ex = cohortDayHours[ck]?.[c.day] || [];
+          if (!ex.length) return false;
+          const ei = c.hi + req.hoursBlock - 1;
+          return ex.some(idx => idx === c.hi - 1) || ex.some(idx => idx === ei + 1);
+        });
+        const finalPool = adj.length > 0 ? adj : cands;
+        finalPool.sort((x, y) => y.score - x.score);
+        confirmarAsignacion(req, finalPool[0]);
+
+        // Re-encolar evictee (marcado: no puede hacer rip-up)
+        reroutedIds.add(evictReq.id);
+        rerouteQueue.push(evictReq);
+        return true;
+      } else {
+        // FASE 3b: ROLLBACK — restaurar mapas de ocupación
+        for (let bi = evictHi; bi < evictHi + evictReq.hoursBlock; bi++) {
+          const h = HOURS[bi];
+          roomOccupied[a.day][h][a.room]              = true;
+          teacherOccupied[a.day][h][evictReq.teacher] = true;
+          cohortOccupied[a.day][h][evictECK]          = true;
+        }
+        // Continuar al siguiente candidato de desalojo
+      }
+    }
+    return false;
+  };
+
+  // ── Helper: elegir mejor candidato con filtro de adyacencia ─────────────────
+  const elegirMejor = (req: ClassRequest, candidates: Array<{day:string;hi:number;room:RoomEntry;score:number}>) => {
+    const ck = `${req.program}__${req.cohort}`;
+    const adyacentes = candidates.filter(c => {
+      const ex = cohortDayHours[ck]?.[c.day] || [];
+      if (!ex.length) return false;
+      const ei = c.hi + req.hoursBlock - 1;
+      return ex.some(idx => idx === c.hi - 1) || ex.some(idx => idx === ei + 1);
+    });
+    const pool2 = adyacentes.length > 0 ? adyacentes : candidates;
+    pool2.sort((a, b) => b.score - a.score);
+    return pool2[0];
+  };
+
+  // ── Función auxiliar para construir sortedPool ──────────────────────────────
+  // OPT 1a: lógica de pool extraída para reusar en main loop y reroute loop
+  const buildSortedPool = (req: ClassRequest): RoomEntry[] | null => {
+    let basePool: RoomEntry[];
     if (req.type === "Laboratorio") {
       basePool = labPool;
     } else {
       basePool = teoriaPool.filter(r => r.subtipo === req.tipoEspacio);
       if (!basePool.length) basePool = teoriaPool;
     }
-
     let pool = basePool.filter(r => {
       if (r.capacity < req.students) return false;
       const ext = externalSpaces?.find((s: any) => s.nombre === r.name);
       if (ext && !ext.activo) return false;
       return true;
     });
-
     if (req.espacioEspecifico) {
-      const allRooms = [...teoriaPool, ...labPool];
-      const forced   = allRooms.find(r => r.name === req.espacioEspecifico);
-      if (forced) {
-        pool = [forced];
-      } else {
-        conflicts.push({ request: req, reason: `Espacio específico "${req.espacioEspecifico}" no encontrado.`, type: "hard" });
-        continue;
-      }
+      const forced = [...teoriaPool, ...labPool].find(r => r.name === req.espacioEspecifico);
+      if (!forced) return null;
+      pool = [forced];
     }
+    if (!pool.length) return null;
 
-    if (pool.length === 0) {
-      conflicts.push({ request: req, reason: `Sin espacio tipo "${req.tipoEspacio}" con capacidad ≥ ${req.students}.`, type: "hard" });
+    // OPT 1a: sort UNA sola vez aquí, fuera de findCandidates
+    const preferredRoom = req.parentId ? parentRoomPreference[req.parentId] : undefined;
+    return [...pool].sort((a, b) => {
+      if (preferredRoom && !req.espacioEspecifico) {
+        if (a.name === preferredRoom) return -1;
+        if (b.name === preferredRoom) return 1;
+      }
+      return (a.capacity - req.students) - (b.capacity - req.students);
+    });
+  };
+
+  // ── Loop principal ──────────────────────────────────────────────────────────
+  for (const req of sorted) {
+    const sortedPool = buildSortedPool(req);
+
+    if (!sortedPool) {
+      const reason = req.espacioEspecifico
+        ? `Espacio específico "${req.espacioEspecifico}" no encontrado.`
+        : `Sin espacio tipo "${req.tipoEspacio}" con capacidad ≥ ${req.students}.`;
+      conflicts.push({ request: req, reason, type: "hard" });
       continue;
     }
 
-    let candidates = findCandidates(req, pool, true,  "hard", false);
-    if (!candidates.length) candidates = findCandidates(req, pool, false, "hard", false);
-    if (!candidates.length) candidates = findCandidates(req, pool, true,  "soft", false);
-    if (!candidates.length) candidates = findCandidates(req, pool, false, "soft", false);
-    if (!candidates.length) candidates = findCandidates(req, pool, false, "soft", true);
-    if (!candidates.length) candidates = findCandidates(req, pool, false, "off",  true);
+    // Cascada de 6 intentos
+    let candidates = findCandidates(req, sortedPool, true,  "hard", false);
+    if (!candidates.length) candidates = findCandidates(req, sortedPool, false, "hard", false);
+    if (!candidates.length) candidates = findCandidates(req, sortedPool, true,  "soft", false);
+    if (!candidates.length) candidates = findCandidates(req, sortedPool, false, "soft", false);
+    if (!candidates.length) candidates = findCandidates(req, sortedPool, false, "soft", true);
+    if (!candidates.length) candidates = findCandidates(req, sortedPool, false, "off",  true);
 
     if (candidates.length > 0) {
-      // Prioridad dura: si hay candidatos adyacentes a clases ya asignadas del mismo semestre,
-      // descartar todos los demás. Garantiza back-to-back sin depender del score.
-      const ck = `${req.program}__${req.cohort}`;
-      const adyacentes = candidates.filter(c => {
-        const existentes = cohortDayHours[ck]?.[c.day] || [];
-        if (existentes.length === 0) return false;
-        const si = getHourIndex(c.hour);
-        const ei = si + req.hoursBlock - 1;
-        return existentes.some(idx => idx === si - 1) || existentes.some(idx => idx === ei + 1);
-      });
-      const pool2 = adyacentes.length > 0 ? adyacentes : candidates;
-      pool2.sort((a, b) => b.score - a.score);
-      confirmarAsignacion(req, pool2[0]);
+      confirmarAsignacion(req, elegirMejor(req, candidates));
+    } else {
+      // OPT 4: Rip-up solo para clases críticas y no ya-desalojadas
+      const isCritical = req.hoursBlock >= 3 || !!req.espacioEspecifico;
+      if (isCritical && !reroutedIds.has(req.id) && attemptRipup(req, sortedPool)) {
+        // éxito silencioso — ya asignado dentro de attemptRipup
+      } else {
+        conflicts.push({
+          request: req,
+          reason: `No hay cupo para "${req.subject}"${req.subgroup ? ` (${req.subgroup})` : ""}`,
+          type: "hard",
+        });
+      }
+    }
+  }
+
+  // OPT 4: Procesar cola de re-enrutados (sin rip-up, sin cascade completa)
+  for (const req of rerouteQueue) {
+    const sortedPool = buildSortedPool(req);
+    if (!sortedPool) {
+      conflicts.push({ request: req, reason: `[Reroute] Sin espacio para "${req.subject}"`, type: "hard" });
+      continue;
+    }
+    let cands = findCandidates(req, sortedPool, true,  "hard", false);
+    if (!cands.length) cands = findCandidates(req, sortedPool, false, "hard", false);
+    if (!cands.length) cands = findCandidates(req, sortedPool, false, "soft", false);
+    if (!cands.length) cands = findCandidates(req, sortedPool, false, "off",  true);
+
+    if (cands.length > 0) {
+      confirmarAsignacion(req, elegirMejor(req, cands));
     } else {
       conflicts.push({
         request: req,
-        reason: `No hay cupo para "${req.subject}"${req.subgroup ? ` (${req.subgroup})` : ""}`,
+        reason: `[Reroute] No hay cupo para "${req.subject}"`,
         type: "hard",
       });
     }
@@ -587,6 +796,7 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
   const [saving,setSaving]               = useState(false);
   const [savedCount,setSavedCount]       = useState(0);
   const [filterView,setFilterView]       = useState<"all"|"teoria"|"lab">("all");
+  const [calculating, setCalculating] = useState(false);
 
   const Sty = {
     overlay:{position:"fixed" as const,inset:0,zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",background:"rgba(0,0,0,0.85)",backdropFilter:"blur(8px)",padding:16},
@@ -610,9 +820,18 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
   const handleFile = (e:React.ChangeEvent<HTMLInputElement>) => { const f=e.target.files?.[0]; if(f) processFile(f); };
 
   const generateSchedule = () => {
-    const result = runScheduler(requests, programConfig, labAvail, externalSpaces);
-    setAssignments(result.assignments); setConflicts(result.conflicts); setStep("preview");
-  };
+  setCalculating(true);
+  setTimeout(() => {
+    try {
+      const result = runScheduler(requests, programConfig, labAvail, externalSpaces);
+      setAssignments(result.assignments);
+      setConflicts(result.conflicts);
+      setStep("preview");
+    } finally {
+      setCalculating(false);
+    }
+  }, 60); // 60ms: suficiente para que React haga flush del estado "calculando"
+};
 
   const handleSave = async () => {
     if(!session) return; setSaving(true); let count=0;
@@ -781,7 +1000,18 @@ export default function AutoScheduler({session,onClose,onSaved,spaces:externalSp
               </div>
               <div style={{display:"flex",gap:10}}>
                 <button onClick={()=>setStep("upload")} style={{...Sty.btn(T.bg),border:`1px solid ${T.border2}`,color:T.mutedL}}>← Volver</button>
-                <button onClick={generateSchedule} style={{...Sty.btn(`linear-gradient(135deg,${T.udBlue},${T.udAccent})`),flex:1}}>🚀 Generar Horario</button>
+                <button
+  onClick={generateSchedule}
+  disabled={calculating}
+  style={{
+    ...Sty.btn(`linear-gradient(135deg,${T.udBlue},${T.udAccent})`),
+    flex: 1,
+    opacity: calculating ? 0.8 : 1,
+    transition: "opacity 0.2s",
+  }}
+>
+  {calculating ? "⏳ Calculando horario óptimo..." : "🚀 Generar Horario"}
+</button>
               </div>
             </div>
           )}
