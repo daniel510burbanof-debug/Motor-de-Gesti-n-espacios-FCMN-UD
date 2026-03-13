@@ -427,7 +427,7 @@ function runScheduler(
     const subgroupLabel = req.subgroup ? ` · ${req.subgroup}` : "";
     assignments.push({
       request: req, day, hour: start,
-      hour_end: block[block.length - 1],
+      hour_end: HOURS[getHourIndex(block[block.length - 1]) + 1] || block[block.length - 1],
       room: room.name,
       tipo_espacio: req.type === "Laboratorio" ? "lab" : "teoria",
       displayLabel: `${req.subject}${subgroupLabel}`,
