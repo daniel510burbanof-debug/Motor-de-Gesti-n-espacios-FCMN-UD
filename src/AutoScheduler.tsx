@@ -240,15 +240,19 @@ function runScheduler(
     }
     if (block[0] < "12:00") score += 3;
 
-    // Bonus fuerte por adyacencia inmediata con otra clase del mismo semestre
     const ck = `${req.program}__${req.cohort}`;
     const existentesHoy = cohortDayHours[ck]?.[day] || [];
     if (existentesHoy.length > 0) {
       const startIdx = getHourIndex(block[0]);
       const endIdx   = startIdx + req.hoursBlock - 1;
-      const pegadoDespues = existentesHoy.includes(startIdx - 1);
-      const pegadoAntes   = existentesHoy.includes(endIdx + 1);
-      if (pegadoDespues || pegadoAntes) score += 25;
+      const pegadoDespues = existentesHoy.some(idx => idx === startIdx - 1);
+      const pegadoAntes   = existentesHoy.some(idx => idx === endIdx + 1);
+      if (pegadoDespues || pegadoAntes) score += 50;
+      // Penalizar hueco de 1h exacta
+      const hayHueco1h = existentesHoy.some(idx =>
+        idx === startIdx - 2 || idx === endIdx + 2
+      );
+      if (hayHueco1h && !pegadoDespues && !pegadoAntes) score -= 20;
     }
 
     // Si es sede relajada: exigir al menos 1h de margen con teoría del mismo semestre
@@ -396,12 +400,7 @@ const effectiveCohortKey = (req.type === "Laboratorio" && req.subgroup)
           const sedeViolation = sedeModo === "soft" && sedeConflicto;
           candidates.push({ day, hour: start, block, room, score: softScore(req, day, block, room, sedeViolation) });
         }
-        if (req.type === "Teoría"      && candidates.length >= 30)  break;
-        if (req.type === "Laboratorio" && candidates.length >= 100) break;
-      }
-      if (req.type === "Teoría"      && candidates.length >= 30)  break;
-      if (req.type === "Laboratorio" && candidates.length >= 100) break;
-    }
+            }
     return candidates;
   };
 
